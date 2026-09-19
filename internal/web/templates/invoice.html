@@ -1,0 +1,49 @@
+{{define "content"}}
+{{with .Invoice}}
+<h2>{{orDash .Number}} <span class="tag {{class .Status}}">{{label .Status}}</span></h2>
+<div class="card">
+  <p class="note">Datei: {{.FileName}} · Eingang {{datetime .ReceivedAt}} von {{orDash .MailFrom}}
+     · Erkennung: {{orDash .Method}}</p>
+  {{with .LastError}}<p class="flash bad">{{.}}</p>{{end}}
+  <form method="post" action="/invoices/{{.ID}}" class="grid">
+    <label for="sender_name">Lieferant</label>
+    <input id="sender_name" name="sender_name" value="{{.SenderName}}">
+    <label for="sender_address">Adresse</label>
+    <input id="sender_address" name="sender_address" value="{{.SenderAddress}}">
+    <label for="sender_vat_id">USt-IdNr.</label>
+    <input id="sender_vat_id" name="sender_vat_id" value="{{.SenderVATID}}">
+    <label for="number">Rechnungsnummer</label>
+    <input id="number" name="number" value="{{.Number}}">
+    <label for="date">Rechnungsdatum</label>
+    <input id="date" name="date" value="{{.Date}}" placeholder="JJJJ-MM-TT">
+    <label for="total">Gesamtbetrag</label>
+    <input id="total" name="total" value="{{if .TotalCents}}{{money .TotalCents}}{{end}}">
+    <label for="currency">Währung</label>
+    <input id="currency" name="currency" value="{{.Currency}}" placeholder="EUR">
+    <label for="vat">Umsatzsteuer</label>
+    <input id="vat" name="vat" value="{{if .VATCents}}{{money .VATCents}}{{end}}">
+    <label for="vat_rate">Steuersatz %</label>
+    <input id="vat_rate" name="vat_rate" value="{{rate .VATRate}}">
+    <label for="skr04">SKR-04-Konto</label>
+    <input id="skr04" name="skr04" value="{{.SKR04}}">
+    <span></span><span><button type="submit">Speichern</button></span>
+  </form>
+  <p class="note">Ablage: {{orDash .ArchivePath}} · DATEV: {{orDash .DatevState}}
+     · sevDesk: {{orDash .SevDeskState}} {{with .SevDeskID}}(Beleg {{.}}){{end}}</p>
+</div>
+{{end}}
+
+<h2>Ereignisse</h2>
+<div class="card">
+  <table class="events"><tbody>
+  {{range .Events}}
+    <tr><td class="note">{{datetime .TS}}</td>
+        <td class="{{if eq .Level "error"}}bad{{else if eq .Level "warn"}}warn{{end}}">{{.Module}}</td>
+        <td>{{.Message}}</td></tr>
+  {{else}}
+    <tr><td class="note">Keine Ereignisse zu dieser Rechnung.</td></tr>
+  {{end}}
+  </tbody></table>
+</div>
+<p><a href="/">← zurück zur Übersicht</a></p>
+{{end}}

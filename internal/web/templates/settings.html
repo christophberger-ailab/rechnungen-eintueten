@@ -1,0 +1,41 @@
+{{define "content"}}
+<h2>Bekannte Absender</h2>
+<div class="card">
+  {{template "senders" .}}
+  <form method="post" action="/senders" class="grid" style="margin-top:1rem">
+    <label for="email">E-Mail</label><input id="email" name="email" type="email" required>
+    <label for="name">Name</label><input id="name" name="name">
+    <label for="skr04">SKR-04-Konto</label><input id="skr04" name="skr04" placeholder="z. B. 6815">
+    <label for="active">Aktiv</label><input id="active" name="active" type="checkbox" checked>
+    <span></span><span><button type="submit">Absender speichern</button></span>
+  </form>
+  <p class="note">Nur Mails dieser Absender werden gelesen. Das SKR-04-Konto wird beim
+    Upload nach sevDesk als Buchungskonto verwendet.</p>
+</div>
+
+<h2>Konfiguration</h2>
+<form method="post" action="/settings">
+  {{range .Groups}}
+  <div class="card">
+    <h3 style="margin-top:0;font-size:.95rem">{{.Name}}</h3>
+    <div class="grid">
+      {{range .Fields}}
+        <label for="{{.Key}}">{{.Label}}</label>
+        {{if eq .Kind "checkbox"}}
+          <input id="{{.Key}}" name="{{.Key}}" type="checkbox" {{if eq .Value "true"}}checked{{end}}>
+        {{else if .Secret}}
+          <input id="{{.Key}}" name="{{.Key}}" type="password" autocomplete="new-password"
+                 placeholder="unverändert lassen">
+        {{else}}
+          <input id="{{.Key}}" name="{{.Key}}" type="{{if eq .Kind "number"}}text{{else}}text{{end}}"
+                 value="{{.Value}}">
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+  <button type="submit">Einstellungen speichern</button>
+  <p class="note">Passwörter und API-Schlüssel werden nie zurück an den Browser gegeben.
+    Ein leeres Feld lässt den gespeicherten Wert unverändert.</p>
+</form>
+{{end}}
