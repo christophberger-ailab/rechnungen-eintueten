@@ -16,6 +16,7 @@ body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-seri
 header { background: #1f2933; color: #fff; padding: .8rem 1.2rem; display: flex; gap: 1.4rem;
          align-items: baseline; }
 header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+header form { margin: 0; }
 header nav a { color: #c8d0d8; text-decoration: none; margin-right: 1rem; }
 header nav a.active, header nav a:hover { color: #fff; }
 main { max-width: 1080px; margin: 1.4rem auto; padding: 0 1rem; }
@@ -40,6 +41,9 @@ button { font: inherit; padding: .45rem 1rem; border-radius: 6px; border: 1px so
          background: #1f2933; color: #fff; cursor: pointer; }
 button[disabled] { opacity: .5; cursor: default; }
 button.ghost { background: transparent; color: var(--bad); border-color: var(--line); }
+button.link { background: none; border: 0; color: #c8d0d8; padding: 0; cursor: pointer; }
+button.link:hover { color: #fff; text-decoration: underline; }
+.flash.warn-box { border-color: var(--warn); }
 input, select { font: inherit; padding: .35rem .5rem; border: 1px solid var(--line);
                 border-radius: 5px; background: #fff; width: 100%; }
 input[type=checkbox] { width: auto; }
@@ -57,11 +61,22 @@ input[type=checkbox] { width: auto; }
 <header>
   <h1>Rechnungen eintüten</h1>
   <nav>
-    <a href="/" class="{{if eq .Active "dashboard"}}active{{end}}">Übersicht</a>
-    <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}">Einstellungen</a>
+    {{if ne .Active "login"}}
+      <a href="/" class="{{if eq .Active "dashboard"}}active{{end}}">Übersicht</a>
+      <a href="/settings" class="{{if eq .Active "settings"}}active{{end}}">Einstellungen</a>
+    {{end}}
   </nav>
+  {{if .LoggedIn}}
+    <form method="post" action="/logout" style="margin-left:auto">
+      <button class="link" type="submit">Abmelden</button>
+    </form>
+  {{end}}
 </header>
 <main>
+{{if and (not .Protected) (ne .Active "login")}}
+  <p class="flash warn-box">Kein Passwort gesetzt – das Web-UI ist für jeden erreichbar, der
+    das Netzwerk erreicht. <a href="/settings">Jetzt eines vergeben.</a></p>
+{{end}}
 {{if .Message}}<p class="flash">{{.Message}}</p>{{end}}
 {{if .Error}}<p class="flash bad">{{.Error}}</p>{{end}}
 {{template "content" .}}

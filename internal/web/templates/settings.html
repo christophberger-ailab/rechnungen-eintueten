@@ -13,6 +13,23 @@
     Upload nach sevDesk als Buchungskonto verwendet.</p>
 </div>
 
+<h2>Zugang</h2>
+<div class="card">
+  <form method="post" action="/password" class="grid">
+    <label for="new-password">Neues Passwort</label>
+    <input id="new-password" name="password" type="password" autocomplete="new-password">
+    <label for="repeat">Wiederholen</label>
+    <input id="repeat" name="repeat" type="password" autocomplete="new-password">
+    <span></span><span><button type="submit">Passwort setzen</button></span>
+  </form>
+  <p class="note">
+    {{if .Protected}}Das Web-UI ist passwortgeschützt.{{else}}Das Web-UI ist derzeit ungeschützt.{{end}}
+    Es gibt nur ein Passwort für die gesamte Installation. Nach dem Ändern werden alle
+    Anmeldungen beendet. Beide Felder leer lassen schaltet den Schutz ab – sinnvoll nur,
+    wenn das Netzwerk selbst den Zugang beschränkt.
+  </p>
+</div>
+
 <h2>Konfiguration</h2>
 <form method="post" action="/settings">
   {{range .Groups}}

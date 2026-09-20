@@ -49,6 +49,8 @@ For a cron setup, skip the server and run the pipeline directly:
 | `rechnungen sender` | list known senders |
 | `rechnungen sender <mail> <skr04> [name]` | add or update a sender |
 | `rechnungen sender rm <mail>` | remove a sender |
+| `rechnungen passwort` | set the web UI password (prompts, no echo) |
+| `rechnungen restore <target.db>` | fetch the newest copy from the backup bucket |
 
 `-db` selects the database file (default `rechnungen.db`), `-addr` overrides
 the web UI address.
@@ -132,8 +134,64 @@ The VAT regulation sent with a voucher comes from `sevdesk.tax_rule`
 booking account, so the account is asked which rules it allows and the
 configured one is used only if it is among them.
 
+## Access control
+
+One installation, one password — there are no user accounts. Set it with
+`rechnungen passwort` (it prompts without echoing; a script may pipe the
+password in) or on the settings page. The password is stored as a bcrypt hash.
+
+Logging in creates a session that lasts 30 days. Only a SHA-256 of the session
+token is stored, so a copy of the database hands nobody a live session.
+Changing the password ends every session. The cookie is `HttpOnly` and
+`SameSite=Lax`, and carries `Secure` only when the request arrived over TLS —
+over plain HTTP inside a VPN it would otherwise be dropped by the browser.
+
+**With no password configured the web UI is open to anyone who can reach it**,
+and every page says so in a banner. That is a usable setup when the network
+already restricts access — a Tailscale tailnet, for instance — and it is also
+what lets you set the first password without a chicken-and-egg problem. Once a
+password is set, changing it requires being logged in.
+
+Brute force is not much of a concern behind a VPN, but a wrong password costs a
+bcrypt round plus a one-second delay, and lands in the event log with the
+client IP.
+
+## Backup
+
+The SQLite database is replicated continuously to S3-compatible object storage
+with [Litestream](https://litestream.io), embedded in this process — no second
+binary, no YAML, no cron. Switch it on under *Backup (Litestream)* in the
+settings and restart; the server prints the bucket it replicates to on start
+and flushes the last changes on shutdown.
+
+The defaults point at Hetzner Object Storage (`https://fsn1.your-objectstorage.com`,
+region `fsn1`, path-style URLs); change the endpoint and region if your bucket
+lives in another location. Any S3-compatible endpoint works.
+
+To restore, `rechnungen restore <target.db>`. It refuses to overwrite an
+existing file. Since the bucket settings live in the database being restored,
+they are read from the environment:
+
+```sh
+export RECHNUNGEN_BACKUP_ENDPOINT=https://fsn1.your-objectstorage.com
+export RECHNUNGEN_BACKUP_REGION=fsn1
+export RECHNUNGEN_BACKUP_BUCKET=meine-backups
+export RECHNUNGEN_BACKUP_PATH=rechnungen
+export RECHNUNGEN_BACKUP_ACCESS_KEY_ID=...
+export RECHNUNGEN_BACKUP_SECRET_ACCESS_KEY=...
+rechnungen restore ./wiederhergestellt.db
+```
+
+When the old database is still readable — restoring a copy to check that the
+backup actually works — its settings are used as the base and the environment
+only fills the gaps, so a test restore needs no variables at all.
+
+Keep the credentials somewhere outside the database too. A backup you cannot
+reach without the thing you are restoring is not a backup.
+
 ## Web UI
 
+- **Anmelden** — the password form, the only page reachable without a session.
 - **Übersicht** — counts per state, the last run, a "Verarbeitung starten"
   button that runs the pipeline in the background, a history table and the
   event log. While a run is in flight the panels refresh themselves via htmx.
@@ -161,6 +219,7 @@ are the single source of truth — they drive loading, saving and the form.
 | DATEV | `datev.to`, `datev.from`, `datev.subject`, `datev.enabled` |
 | sevDesk | `sevdesk.base_url`, `sevdesk.token`, `sevdesk.enabled`, `sevdesk.tax_rule`, `sevdesk.fx_tolerance`, `sevdesk.gain_account`, `sevdesk.loss_account` |
 | Ablage | `archive.base_dir`, `spool.dir` |
+| Backup (Litestream) | `backup.enabled`, `backup.endpoint`, `backup.region`, `backup.bucket`, `backup.path`, `backup.access_key_id`, `backup.secret_access_key`, `backup.force_path_style`, `backup.sync_interval` |
 | Ablauf | `schedule.daily_at`, `http.addr` |
 
 A module with no credentials configured is skipped rather than failing the
@@ -172,8 +231,9 @@ run, so you can put the pieces into service one at a time.
   data-protection decision, not a technical one. Both steps are optional: with
   no API key configured the chain stops after the text scan and flags what it
   could not read.
-- **The web UI has no authentication.** Bind it to localhost and put it behind
-  your own reverse proxy, or keep it on a trusted network.
+- **The web UI serves plain HTTP.** The password protects it, but on an open
+  network the password itself travels in the clear — keep it inside a VPN or
+  behind a TLS-terminating proxy that sets `X-Forwarded-Proto: https`.
 - **The archive copy is not a GoBD-compliant archive** on its own. It files the
   originals where your bookkeeping expects them; audit-proof storage is a
   separate concern.
@@ -193,7 +253,8 @@ internal/archive    the FIBU directory tree
 internal/datev      mail to DATEV and its confirmations
 internal/sevdesk    API client and payment matching
 internal/pipeline   stage orchestration, scheduler, run guard
-internal/web        HTMX UI, templates and htmx itself
+internal/backup     Litestream replication to S3, embedded
+internal/web        HTMX UI, templates, login and htmx itself
 ```
 
 ## Tests
@@ -206,8 +267,10 @@ The suite covers amount and date parsing in both notations, ZUGFeRD (CII) and
 XRechnung (UBL) parsing, the whole chain over a real PDF and over a PDF with
 an embedded `factur-x.xml`, the archive paths and collision handling, payment
 matching including the currency-difference cases, DATEV reply classification,
-MIME composition and parsing, the store, the settings round trip, and the web
-UI routes. The sevDesk tests run against a stub server and assert the request
+MIME composition and parsing, the store, the settings round trip, the login
+flow (guard, session cookie, logout, password changes, the htmx redirect and
+the off-site redirect that must not happen), a Litestream replicate/restore
+round trip through its file backend, and the web UI routes. The sevDesk tests run against a stub server and assert the request
 shapes the OpenAPI description defines — the tax rule, the `dd.mm.yyyy` dates,
 the gross/net position fields, the booking types and which side a currency
 gain or loss books to. Nothing in the suite talks to the network.

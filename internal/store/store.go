@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS invoices_status ON invoices(status);
 
+CREATE TABLE IF NOT EXISTS sessions (
+	token_hash TEXT PRIMARY KEY,
+	created_at TEXT NOT NULL DEFAULT (datetime('now')),
+	expires_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
 	trigger     TEXT NOT NULL,

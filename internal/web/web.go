@@ -31,17 +31,22 @@ type Server struct {
 // New builds the HTTP handler for the web UI.
 func New(db *store.DB, runner *pipeline.Runner) *Server {
 	s := &Server{db: db, runner: runner, pages: map[string]*template.Template{}}
-	for _, page := range []string{"dashboard", "settings", "invoice"} {
+	for _, page := range []string{"dashboard", "settings", "invoice", "login"} {
 		s.pages[page] = template.Must(template.New("layout.html").Funcs(funcs).
 			ParseFS(files, "templates/layout.html", "templates/partials.html", "templates/"+page+".html"))
 	}
 	return s
 }
 
-// Handler returns the routes of the web UI.
+// Handler returns the routes of the web UI, behind the login guard.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/", http.FileServerFS(files))
+
+	mux.HandleFunc("GET /login", s.login)
+	mux.HandleFunc("POST /login", s.doLogin)
+	mux.HandleFunc("POST /logout", s.logout)
+	mux.HandleFunc("POST /password", s.setPassword)
 
 	mux.HandleFunc("GET /{$}", s.dashboard)
 	mux.HandleFunc("GET /partials/status", s.statusPartial)
@@ -55,7 +60,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /invoices/{id}", s.invoice)
 	mux.HandleFunc("POST /invoices/{id}", s.saveInvoice)
-	return mux
+	return s.guard(mux)
 }
 
 // view is the data every page gets.
@@ -72,6 +77,11 @@ type view struct {
 	Senders  []store.Sender
 	Message  string
 	Error    string
+	Next     string // where to go after logging in
+	// Protected is false when no password is configured, which the dashboard
+	// points out.
+	Protected bool
+	LoggedIn  bool
 }
 
 type configGroup struct {
@@ -86,7 +96,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.Title, v.Active = "Übersicht", "dashboard"
-	s.render(w, "dashboard", v)
+	s.render(w, r, "dashboard", v)
 }
 
 func (s *Server) dashboardView() (*view, error) {
@@ -145,10 +155,10 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
-	s.renderSettings(w, "", "")
+	s.renderSettings(w, r, "", "")
 }
 
-func (s *Server) renderSettings(w http.ResponseWriter, message, errMsg string) {
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, message, errMsg string) {
 	values, err := s.db.Settings()
 	if err != nil {
 		s.fail(w, err)
@@ -175,7 +185,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, message, errMsg string) {
 		}
 		v.Groups = append(v.Groups, group)
 	}
-	s.render(w, "settings", v)
+	s.render(w, r, "settings", v)
 }
 
 // saveSettings stores the submitted configuration. An empty secret means
@@ -199,10 +209,10 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		values[f.Key] = submitted
 	}
 	if err := s.db.SetSettings(values); err != nil {
-		s.renderSettings(w, "", err.Error())
+		s.renderSettings(w, r, "", err.Error())
 		return
 	}
-	s.renderSettings(w, "Einstellungen gespeichert.", "")
+	s.renderSettings(w, r, "Einstellungen gespeichert.", "")
 }
 
 func (s *Server) saveSender(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +222,7 @@ func (s *Server) saveSender(w http.ResponseWriter, r *http.Request) {
 	}
 	email := strings.ToLower(strings.TrimSpace(r.PostFormValue("email")))
 	if email == "" {
-		s.renderSettings(w, "", "Absender braucht eine E-Mail-Adresse.")
+		s.renderSettings(w, r, "", "Absender braucht eine E-Mail-Adresse.")
 		return
 	}
 	sender := store.Sender{
@@ -222,10 +232,10 @@ func (s *Server) saveSender(w http.ResponseWriter, r *http.Request) {
 		Active: r.PostFormValue("active") != "",
 	}
 	if err := s.db.SaveSender(sender); err != nil {
-		s.renderSettings(w, "", err.Error())
+		s.renderSettings(w, r, "", err.Error())
 		return
 	}
-	s.renderSettings(w, "Absender gespeichert.", "")
+	s.renderSettings(w, r, "Absender gespeichert.", "")
 }
 
 func (s *Server) deleteSender(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +248,7 @@ func (s *Server) deleteSender(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	s.renderSettings(w, "Absender gelöscht.", "")
+	s.renderSettings(w, r, "Absender gelöscht.", "")
 }
 
 func (s *Server) invoice(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +268,7 @@ func (s *Server) invoice(w http.ResponseWriter, r *http.Request) {
 			own = append(own, e)
 		}
 	}
-	s.render(w, "invoice", &view{Title: "Rechnung " + inv.Number, Active: "dashboard",
+	s.render(w, r, "invoice", &view{Title: "Rechnung " + inv.Number, Active: "dashboard",
 		Invoice: inv, Events: own})
 }
 
@@ -304,7 +314,14 @@ func (s *Server) loadInvoice(r *http.Request) (*store.Invoice, error) {
 	return s.db.Invoice(id)
 }
 
-func (s *Server) render(w http.ResponseWriter, page string, v *view) {
+func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, v *view) {
+	protected, err := s.db.PasswordSet()
+	if err != nil {
+		s.db.Log(0, 0, "web", "error", "Passwortstatus lesen: %v", err)
+	}
+	v.Protected = protected
+	v.LoggedIn = protected && s.loggedIn(r)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.pages[page].ExecuteTemplate(w, "layout.html", v); err != nil {
 		s.db.Log(0, 0, "web", "error", "Seite %s: %v", page, err)

@@ -51,6 +51,16 @@ type Config struct {
 	ArchiveDir string `cfg:"archive.base_dir" group:"Ablage" label:"Basisverzeichnis" default:"./FIBU"`
 	SpoolDir   string `cfg:"spool.dir" group:"Ablage" label:"Spool-Verzeichnis (Originale)" default:"./spool"`
 
+	BackupEnabled   bool   `cfg:"backup.enabled" group:"Backup (Litestream)" label:"Aktiv"`
+	BackupEndpoint  string `cfg:"backup.endpoint" group:"Backup (Litestream)" label:"S3-Endpoint" default:"https://fsn1.your-objectstorage.com"`
+	BackupRegion    string `cfg:"backup.region" group:"Backup (Litestream)" label:"Region" default:"fsn1"`
+	BackupBucket    string `cfg:"backup.bucket" group:"Backup (Litestream)" label:"Bucket"`
+	BackupPath      string `cfg:"backup.path" group:"Backup (Litestream)" label:"Pfad im Bucket" default:"rechnungen"`
+	BackupKeyID     string `cfg:"backup.access_key_id" group:"Backup (Litestream)" label:"Access Key ID" secret:"true"`
+	BackupSecret    string `cfg:"backup.secret_access_key" group:"Backup (Litestream)" label:"Secret Access Key" secret:"true"`
+	BackupPathStyle bool   `cfg:"backup.force_path_style" group:"Backup (Litestream)" label:"Path-Style-URLs" default:"true"`
+	BackupInterval  int    `cfg:"backup.sync_interval" group:"Backup (Litestream)" label:"Sync-Intervall (s)" default:"10"`
+
 	DailyAt  string `cfg:"schedule.daily_at" group:"Ablauf" label:"Tägliche Ausführung (HH:MM)" default:"03:00"`
 	HTTPAddr string `cfg:"http.addr" group:"Ablauf" label:"Web-UI Adresse" default:":8080"`
 }
