@@ -44,6 +44,7 @@ type Config struct {
 	SevDeskToken   string  `cfg:"sevdesk.token" group:"sevDesk" label:"API Token" secret:"true"`
 	SevDeskEnabled bool    `cfg:"sevdesk.enabled" group:"sevDesk" label:"Aktiv" default:"true"`
 	SevDeskTol     float64 `cfg:"sevdesk.fx_tolerance" group:"sevDesk" label:"FX-Toleranz (%)" default:"5"`
+	SevDeskTaxRule string  `cfg:"sevdesk.tax_rule" group:"sevDesk" label:"Steuerregel (1=USt-pflichtig, 5=Reverse Charge, 11=§19 UStG)" default:"1"`
 	SevDeskGain    string  `cfg:"sevdesk.gain_account" group:"sevDesk" label:"Konto Erlös Währungsumrechnung" default:"4840"`
 	SevDeskLoss    string  `cfg:"sevdesk.loss_account" group:"sevDesk" label:"Konto Verlust Währungsumrechnung" default:"6880"`
 

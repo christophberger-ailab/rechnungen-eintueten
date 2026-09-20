@@ -10,13 +10,15 @@ and its database file.
 
 ## Status
 
-All modules are implemented and covered by tests. One caveat before you point
-it at a live account: the **sevDesk client is written against the publicly
-documented shape of the API, and a few endpoints had to be inferred** (the
-official spec was not reachable from the machine this was built on). Every
-guess is marked with a `// NOTE:` comment in `internal/sevdesk/client.go`.
-Verify those against your own sevDesk account before the first real upload —
-the request plumbing is tested, the exact endpoint contracts are not.
+All modules are implemented and covered by tests. The sevDesk client follows
+sevDesk's own OpenAPI description and targets **sevdesk-Update 2.0**, which
+books voucher positions to an `accountDatev` and states the VAT regulation as
+a `taxRule`. Accounts still on Update 1.0 expect an `accountingType` instead,
+whose ids live in a different namespace; that form is not implemented.
+
+Still worth a dry run on a test account before the first real upload: the
+requests match the spec and are tested against a stub server, but no call in
+this repository has ever reached sevDesk itself.
 
 ## Quick start
 
@@ -116,9 +118,19 @@ voucher first:
 - paid **less** than invoiced → *Erlös aus Währungsumrechnung* (`sevdesk.gain_account`, default 4840)
 - paid **more** than invoiced → *Verlust aus Währungsumrechnung* (`sevdesk.loss_account`, default 6880)
 
-Then the payment is linked to the voucher and the voucher's status is read
-back from sevDesk — the invoice counts as paid only when sevDesk says
-*Bezahlt*, not because the booking call returned without an error.
+Then the payment is linked to the voucher. A payment that settles the invoice
+exactly is booked as `FULL_PAYMENT`; one that differs is booked as `O`
+("reduced/higher amount due to other reasons"), which settles the voucher
+despite the difference — sevDesk's dedicated currency-fluctuation code `CF` is
+deprecated. Finally the voucher's status is read back from sevDesk: the
+invoice counts as paid only when sevDesk says *Bezahlt*, not because the
+booking call returned without an error.
+
+The VAT regulation sent with a voucher comes from `sevdesk.tax_rule`
+(`1` = Umsatzsteuerpflichtige Umsätze, `5` = Reverse Charge gem. §13b,
+`11` = §19 UStG). sevDesk rejects a voucher whose tax rule does not fit its
+booking account, so the account is asked which rules it allows and the
+configured one is used only if it is among them.
 
 ## Web UI
 
@@ -147,7 +159,7 @@ are the single source of truth — they drive loading, saving and the form.
 | LLM | `llm.base_url`, `llm.api_key`, `llm.model`, `llm.kind`, `llm.timeout` |
 | OCR | `ocr.base_url`, `ocr.api_key`, `ocr.model` |
 | DATEV | `datev.to`, `datev.from`, `datev.subject`, `datev.enabled` |
-| sevDesk | `sevdesk.base_url`, `sevdesk.token`, `sevdesk.enabled`, `sevdesk.fx_tolerance`, `sevdesk.gain_account`, `sevdesk.loss_account` |
+| sevDesk | `sevdesk.base_url`, `sevdesk.token`, `sevdesk.enabled`, `sevdesk.tax_rule`, `sevdesk.fx_tolerance`, `sevdesk.gain_account`, `sevdesk.loss_account` |
 | Ablage | `archive.base_dir`, `spool.dir` |
 | Ablauf | `schedule.daily_at`, `http.addr` |
 
@@ -194,6 +206,8 @@ The suite covers amount and date parsing in both notations, ZUGFeRD (CII) and
 XRechnung (UBL) parsing, the whole chain over a real PDF and over a PDF with
 an embedded `factur-x.xml`, the archive paths and collision handling, payment
 matching including the currency-difference cases, DATEV reply classification,
-MIME composition and parsing, the sevDesk request plumbing against a stub
-server, the store, the settings round trip, and the web UI routes. Nothing in
-the suite talks to the network.
+MIME composition and parsing, the store, the settings round trip, and the web
+UI routes. The sevDesk tests run against a stub server and assert the request
+shapes the OpenAPI description defines — the tax rule, the `dd.mm.yyyy` dates,
+the gross/net position fields, the booking types and which side a currency
+gain or loss books to. Nothing in the suite talks to the network.

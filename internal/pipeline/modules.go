@@ -157,6 +157,7 @@ func (p *Pipeline) sevdeskAll(ctx context.Context) error {
 			TotalCents:   inv.TotalCents,
 			VATCents:     inv.VATCents,
 			VATRate:      inv.VATRate,
+			TaxRule:      p.cfg.SevDeskTaxRule,
 		})
 		if err != nil {
 			inv.SevDeskState = store.SevDeskFailed
@@ -246,7 +247,9 @@ func (p *Pipeline) book(ctx context.Context, inv *store.Invoice, match sevdesk.M
 	if paid < 0 {
 		paid = -paid
 	}
-	if err := p.sev.BookVoucher(ctx, inv.SevDeskID, match.Transaction.ID, paid); err != nil {
+	// An inexact payment is booked as a settlement with a difference, so the
+	// voucher still ends up "Bezahlt" after the conversion delta was booked.
+	if err := p.sev.BookVoucher(ctx, inv.SevDeskID, match.Transaction.ID, paid, match.Exact()); err != nil {
 		return err
 	}
 

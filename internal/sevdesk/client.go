@@ -3,11 +3,13 @@
 // invoices (Vouchers) as PDF attachments and reconcile them against bank
 // transactions.
 //
-// sevDesk wraps every response body in {"objects": ...} and expects object
-// references in request bodies as {"id": "...", "objectName": "..."}. Most
-// scalar fields (including numbers) come back as JSON strings, a
-// long-standing quirk of sevDesk's backend; this client parses them
-// accordingly.
+// It follows sevDesk's OpenAPI description. Two of its habits shape the code
+// below: responses wrap their payload in {"objects": ...} and return numbers
+// and status codes as JSON strings, while requests take object references as
+// {"id": "...", "objectName": "..."} and amounts as JSON numbers.
+//
+// The client targets sevdesk-Update 2.0, which books voucher positions to an
+// accountDatev and states the VAT regulation as a taxRule.
 package sevdesk
 
 import (
@@ -54,6 +56,15 @@ const (
 	StatusPaid  = 1000 // "Bezahlt"
 )
 
+// Status codes of a bank transaction (CheckAccountTransaction).
+const (
+	StatusTransactionCreated = 100 // imported, not linked to anything yet
+	StatusTransactionLinked  = 200
+	StatusTransactionPrivate = 300
+	StatusTransactionAuto    = 350
+	StatusTransactionBooked  = 400
+)
+
 // ref is an object reference as sevDesk expects it in request bodies and
 // returns it in responses: {"id": "...", "objectName": "..."}.
 type ref struct {
@@ -83,6 +94,9 @@ type VoucherInput struct {
 	TotalCents   int64  // gross
 	VATCents     int64
 	VATRate      float64 // percent, e.g. 19
+	// TaxRule is the sevDesk tax rule id; empty means TaxRuleStandard.
+	// "5" is reverse charge, "11" a small business under §19 UStG.
+	TaxRule string
 }
 
 // Transaction is a bank transaction (CheckAccountTransaction).
@@ -133,10 +147,8 @@ type apiTransaction struct {
 	PaymtPurpose   string `json:"paymtPurpose"`
 	Status         string `json:"status"`
 	CheckAccount   ref    `json:"checkAccount"`
-	// NOTE: CheckAccountTransaction has no documented per-row currency
-	// field in the sources available while writing this client (a sevDesk
-	// check account is normally single-currency); Currency is populated
-	// only if the API happens to echo one back.
+	// A transaction carries no currency of its own - a check account is
+	// single-currency - so this stays empty unless the API echoes one back.
 	Currency string `json:"currency,omitempty"`
 }
 
@@ -154,31 +166,46 @@ func (a apiTransaction) toTransaction() Transaction {
 	}
 }
 
-// dateOnly trims a sevDesk timestamp such as "2024-05-10T00:00:00+02:00"
-// down to its leading YYYY-MM-DD.
+// dateOnly normalises the dates sevDesk returns - an ISO timestamp such as
+// "2024-05-10T00:00:00+02:00", or the German "10.05.2024" - down to
+// YYYY-MM-DD.
 func dateOnly(s string) string {
+	if len(s) >= 10 && s[2] == '.' && s[5] == '.' {
+		return s[6:10] + "-" + s[3:5] + "-" + s[:2]
+	}
 	if len(s) >= 10 {
 		return s[:10]
 	}
 	return s
 }
 
-// centsToAmount converts minor units (cents) to the decimal string sevDesk
-// expects for amount fields, e.g. 12345 -> "123.45".
+// sevDate renders an ISO date the way sevDesk documents its date fields,
+// dd.mm.yyyy. Anything it does not recognise is passed through untouched.
+func sevDate(iso string) string {
+	t, err := time.Parse("2006-01-02", iso)
+	if err != nil {
+		return iso
+	}
+	return t.Format("02.01.2006")
+}
+
+// amount converts minor units to the decimal number sevDesk expects in
+// amount fields: 123456 becomes 1234.56.
+func amount(cents int64) float64 { return float64(cents) / 100 }
+
+// centsToAmount renders minor units as a decimal string, for the few fields
+// sevDesk documents as strings.
 func centsToAmount(cents int64) string {
 	sign := ""
 	if cents < 0 {
-		sign = "-"
-		cents = -cents
+		sign, cents = "-", -cents
 	}
 	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
 }
 
-// amountToCents converts a sevDesk decimal amount (JSON numbers decode to
-// float64) to minor units (cents), rounding to the nearest cent.
-func amountToCents(amount float64) int64 {
-	return int64(math.Round(amount * 100))
-}
+// amountToCents converts a sevDesk decimal amount to minor units, rounding to
+// the nearest cent.
+func amountToCents(a float64) int64 { return int64(math.Round(a * 100)) }
 
 // baseName returns the final path element of a file path, without pulling
 // in path/filepath.
@@ -314,9 +341,8 @@ func (c *Client) uploadTempFile(ctx context.Context, path string) (string, error
 		return "", fmt.Errorf("sevdesk: upload %s: status %d: %s", path, resp.StatusCode, truncate(data, 500))
 	}
 
-	// NOTE: the exact response shape of uploadTempFile is not published;
-	// third-party clients report an "objects" object carrying the assigned
-	// "filename" directly (not array-wrapped, unlike list/get endpoints).
+	// The upload answers with an "objects" object - not the array the list
+	// and get endpoints use - carrying the name sevDesk filed the PDF under.
 	var out struct {
 		Objects struct {
 			Filename string `json:"filename"`
@@ -331,75 +357,128 @@ func (c *Client) uploadTempFile(ctx context.Context, path string) (string, error
 	return out.Objects.Filename, nil
 }
 
-// resolveAccountDatev looks up the internal AccountDatev reference for a
-// SKR04 booking account number, as required by voucher positions.
+// account is a booking account as sevDesk knows it, together with the tax
+// rules it permits.
+type account struct {
+	ref        ref
+	taxRuleIDs []string
+}
+
+// resolveAccount looks up the internal AccountDatev reference for an SKR-04
+// account number. Voucher positions reference the account by sevDesk's own id,
+// not by the DATEV number, so every upload starts with this lookup.
 //
-// NOTE: this uses GET /ReceiptGuidance/forAccountNumber with an
-// "accountNumber" query parameter, inferred from third-party client source
-// code rather than sevDesk's own published docs (which were not reachable
-// while writing this client). The response is assumed to carry an
-// "accountDatevId" field per object, matching those sources.
-func (c *Client) resolveAccountDatev(ctx context.Context, skr04 string) (ref, error) {
+// GET /ReceiptGuidance/forAccountNumber also states which tax rules the
+// account allows, which is how the voucher's taxRule is chosen.
+func (c *Client) resolveAccount(ctx context.Context, skr04 string) (account, error) {
 	q := url.Values{"accountNumber": {skr04}}
 	var out struct {
 		Objects []struct {
-			AccountDatevID string `json:"accountDatevId"`
+			AccountDatevID  json.Number `json:"accountDatevId"`
+			AccountName     string      `json:"accountName"`
+			AllowedTaxRules []struct {
+				ID json.Number `json:"id"`
+			} `json:"allowedTaxRules"`
 		} `json:"objects"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/ReceiptGuidance/forAccountNumber", q, nil, &out); err != nil {
-		return ref{}, fmt.Errorf("sevdesk: resolve SKR04 account %s: %w", skr04, err)
+		return account{}, fmt.Errorf("sevdesk: resolve SKR04 account %s: %w", skr04, err)
 	}
-	if len(out.Objects) == 0 || out.Objects[0].AccountDatevID == "" {
-		return ref{}, fmt.Errorf("sevdesk: no accounting guidance for SKR04 account %s", skr04)
+	if len(out.Objects) == 0 || out.Objects[0].AccountDatevID.String() == "" {
+		return account{}, fmt.Errorf("sevdesk: no accounting guidance for SKR04 account %s", skr04)
 	}
-	return ref{ID: out.Objects[0].AccountDatevID, ObjectName: "AccountDatev"}, nil
+	first := out.Objects[0]
+	acc := account{ref: ref{ID: first.AccountDatevID.String(), ObjectName: "AccountDatev"}}
+	for _, rule := range first.AllowedTaxRules {
+		acc.taxRuleIDs = append(acc.taxRuleIDs, rule.ID.String())
+	}
+	return acc, nil
+}
+
+// TaxRuleStandard is "Umsatzsteuerpflichtige Umsätze", the rule that applies
+// to an ordinary German supplier invoice with VAT.
+const TaxRuleStandard = "1"
+
+// taxRule picks the tax rule for a position on this account: the preferred one
+// when the account allows it, otherwise the first one it does allow. sevDesk
+// rejects a voucher whose tax rule does not fit its booking account, and the
+// account itself is the only place that knows which ones fit.
+func (a account) taxRule(preferred string) ref {
+	if len(a.taxRuleIDs) == 0 {
+		return ref{ID: preferred, ObjectName: "TaxRule"}
+	}
+	for _, id := range a.taxRuleIDs {
+		if id == preferred {
+			return ref{ID: id, ObjectName: "TaxRule"}
+		}
+	}
+	return ref{ID: a.taxRuleIDs[0], ObjectName: "TaxRule"}
 }
 
 // voucherSave is the "voucher" half of a Voucher/Factory/saveVoucher request.
+// taxType belongs to sevdesk-Update 1.0 and taxRule to 2.0; both are sent so
+// the same request works on either generation of account.
 type voucherSave struct {
 	ObjectName   string `json:"objectName"`
 	MapAll       bool   `json:"mapAll"`
-	Status       int    `json:"status"`
-	CreditDebit  string `json:"creditDebit"` // "C" (credit/expense) or "D" (debit)
+	Status       int    `json:"status"`      // 50 draft, 100 open
+	CreditDebit  string `json:"creditDebit"` // "C" credit: we bought; "D" debit: we sold
 	VoucherType  string `json:"voucherType"` // "VOU" for a regular voucher
-	TaxType      string `json:"taxType"`     // "default" = gross amounts on positions
-	VoucherDate  string `json:"voucherDate"`
+	TaxType      string `json:"taxType"`
+	TaxRule      ref    `json:"taxRule"`
+	VoucherDate  string `json:"voucherDate"` // dd.mm.yyyy
 	SupplierName string `json:"supplierName"`
-	Description  string `json:"description"`
-	Currency     string `json:"currency"`
+	Description  string `json:"description"` // the supplier's invoice number
+	Currency     string `json:"currency,omitempty"`
 }
 
 // voucherPosSave is one entry of the "voucherPosSave" array of a
 // Voucher/Factory/saveVoucher request.
+//
+// "net" is a flag, not an amount: it selects whether sevDesk regards sumNet or
+// sumGross. We extract the gross total from the invoice, so it stays false.
+//
+// The position references its booking account through accountDatev, which is
+// the sevdesk-Update 2.0 form. Accounts still on 1.0 expect an accountingType
+// instead, whose ids live in a different namespace - sending a wrong one is
+// worse than sending none, so it is left out.
 type voucherPosSave struct {
 	ObjectName   string  `json:"objectName"`
 	MapAll       bool    `json:"mapAll"`
 	AccountDatev ref     `json:"accountDatev"`
 	TaxRate      float64 `json:"taxRate"`
-	Net          string  `json:"net,omitempty"`
-	Sum          string  `json:"sum"`
+	Net          bool    `json:"net"`
+	SumNet       float64 `json:"sumNet"`
+	SumGross     float64 `json:"sumGross"`
 }
 
-// saveVoucherRequest is the body of POST /Voucher/Factory/saveVoucher.
+// saveVoucherRequest is the body of POST /Voucher/Factory/saveVoucher. The
+// order of filename and the position array matters to sevDesk, so do not
+// reshuffle these fields.
 type saveVoucherRequest struct {
 	Voucher        voucherSave      `json:"voucher"`
 	VoucherPosSave []voucherPosSave `json:"voucherPosSave"`
 	FileName       string           `json:"filename,omitempty"`
 }
 
-// saveVoucherResponse is the (best-effort) shape of a saveVoucher response.
-//
-// NOTE: sevDesk's own docs for this response were not reachable while
-// writing this client; this mirrors the "objects.voucher" shape reported by
-// third-party client libraries.
+// saveVoucherResponse carries the created voucher. The OpenAPI description
+// puts it at the top level, while sevDesk's other endpoints wrap their payload
+// in "objects"; both shapes are accepted so either behaviour works.
 type saveVoucherResponse struct {
+	Voucher apiVoucher `json:"voucher"`
 	Objects struct {
 		Voucher apiVoucher `json:"voucher"`
 	} `json:"objects"`
 }
 
-// createVoucher shares the saveVoucher plumbing between CreateVoucher and
-// CreateFXVoucher.
+// voucherID returns the id from whichever shape the server used.
+func (r saveVoucherResponse) voucherID() string {
+	if r.Voucher.ID != "" {
+		return r.Voucher.ID
+	}
+	return r.Objects.Voucher.ID
+}
+
 func (c *Client) createVoucher(ctx context.Context, v voucherSave, pos voucherPosSave, filename string) (string, error) {
 	body := saveVoucherRequest{
 		Voucher:        v,
@@ -410,10 +489,11 @@ func (c *Client) createVoucher(ctx context.Context, v voucherSave, pos voucherPo
 	if err := c.do(ctx, http.MethodPost, "/Voucher/Factory/saveVoucher", nil, body, &out); err != nil {
 		return "", err
 	}
-	if out.Objects.Voucher.ID == "" {
+	id := out.voucherID()
+	if id == "" {
 		return "", errors.New("sevdesk: create voucher: no id in response")
 	}
-	return out.Objects.Voucher.ID, nil
+	return id, nil
 }
 
 // CreateVoucher uploads the PDF, then creates a voucher in status "Offen"
@@ -423,19 +503,24 @@ func (c *Client) CreateVoucher(ctx context.Context, in VoucherInput) (string, er
 	if err != nil {
 		return "", err
 	}
-	account, err := c.resolveAccountDatev(ctx, in.SKR04)
+	acc, err := c.resolveAccount(ctx, in.SKR04)
 	if err != nil {
 		return "", err
+	}
+	taxRule := in.TaxRule
+	if taxRule == "" {
+		taxRule = TaxRuleStandard
 	}
 
 	v := voucherSave{
 		ObjectName:   "Voucher",
 		MapAll:       true,
 		Status:       StatusOpen,
-		CreditDebit:  "C",
+		CreditDebit:  "C", // an incoming invoice: we bought something
 		VoucherType:  "VOU",
 		TaxType:      "default",
-		VoucherDate:  in.Date,
+		TaxRule:      acc.taxRule(taxRule),
+		VoucherDate:  sevDate(in.Date),
 		SupplierName: in.SupplierName,
 		Description:  in.Number,
 		Currency:     in.Currency,
@@ -443,10 +528,11 @@ func (c *Client) CreateVoucher(ctx context.Context, in VoucherInput) (string, er
 	pos := voucherPosSave{
 		ObjectName:   "VoucherPos",
 		MapAll:       true,
-		AccountDatev: account,
+		AccountDatev: acc.ref,
 		TaxRate:      in.VATRate,
-		Net:          centsToAmount(in.TotalCents - in.VATCents),
-		Sum:          centsToAmount(in.TotalCents),
+		Net:          false, // we know the gross total, so sumGross is what counts
+		SumNet:       amount(in.TotalCents - in.VATCents),
+		SumGross:     amount(in.TotalCents),
 	}
 
 	id, err := c.createVoucher(ctx, v, pos, filename)
@@ -474,8 +560,8 @@ func (c *Client) Vouchers(ctx context.Context, status int) ([]Voucher, error) {
 
 // Voucher loads one voucher by id.
 func (c *Client) Voucher(ctx context.Context, id string) (*Voucher, error) {
-	// NOTE: like sevDesk's other single-resource GETs, GET /Voucher/{id}
-	// is assumed to still wrap its result in an "objects" array.
+	// Like the other single-resource GETs, this one answers with a
+	// one-element "objects" array.
 	var out struct {
 		Objects []apiVoucher `json:"objects"`
 	}
@@ -489,23 +575,25 @@ func (c *Client) Voucher(ctx context.Context, id string) (*Voucher, error) {
 	return &v, nil
 }
 
-// Transactions returns bank transactions that are not fully booked yet.
+// Transactions returns the bank transactions that are still waiting to be
+// booked.
 //
-// NOTE: sevDesk's documented CheckAccountTransaction status codes are 100
-// (created/open), 200 (linked), 300/350 (private/automatic) and 400
-// (booked); "not fully booked" is approximated here as status 100, since
-// the precise set of codes that count as unbooked is not published.
+// GET /CheckAccountTransaction has no status filter, so the whole list is
+// fetched and narrowed here. Status 100 means the transaction was created and
+// is not linked to anything yet; 200 is linked, 300 and 350 are private or
+// auto-booked, 400 is booked.
 func (c *Client) Transactions(ctx context.Context) ([]Transaction, error) {
-	q := url.Values{"status": {"100"}}
 	var out struct {
 		Objects []apiTransaction `json:"objects"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/CheckAccountTransaction", q, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/CheckAccountTransaction", nil, nil, &out); err != nil {
 		return nil, fmt.Errorf("sevdesk: list transactions: %w", err)
 	}
 	txs := make([]Transaction, 0, len(out.Objects))
 	for _, a := range out.Objects {
-		txs = append(txs, a.toTransaction())
+		if tx := a.toTransaction(); tx.Status == StatusTransactionCreated {
+			txs = append(txs, tx)
+		}
 	}
 	return txs, nil
 }
@@ -527,34 +615,45 @@ func (c *Client) transaction(ctx context.Context, id string) (apiTransaction, er
 
 // bookAmountRequest is the body of PUT /Voucher/{id}/bookAmount.
 type bookAmountRequest struct {
-	Amount                  string `json:"amount"`
-	Date                    string `json:"date"`
-	Type                    string `json:"type"` // "N" = normal payment
-	CheckAccount            ref    `json:"checkAccount"`
-	CheckAccountTransaction ref    `json:"checkAccountTransaction"`
-	CreateFeed              bool   `json:"createFeed"`
+	Amount                  float64 `json:"amount"`
+	Date                    string  `json:"date"`
+	Type                    string  `json:"type"`
+	CheckAccount            ref     `json:"checkAccount"`
+	CheckAccountTransaction ref     `json:"checkAccountTransaction"`
+	CreateFeed              bool    `json:"createFeed"`
 }
 
-// BookVoucher links a transaction to a voucher, booking amountCents of it.
+// Booking types accepted by bookAmount. FULL_PAYMENT settles the voucher;
+// BookingOther settles it although the amount differs, which is what a
+// currency conversion leaves behind. (sevDesk's own CF code for currency
+// fluctuations is deprecated.)
+const (
+	BookingFull  = "FULL_PAYMENT"
+	BookingOther = "O"
+)
+
+// BookVoucher links a transaction to a voucher and books amountCents of it.
 //
-// Endpoint: PUT /Voucher/{voucherId}/bookAmount.
-//
-// NOTE: third-party client sources disagree on this endpoint's spelling
-// ("bookAmount" vs. a documented typo "bookAmmount" in at least one
-// generated client); "bookAmount" is used here as it matches sevDesk's own
-// tech-blog posts and most community clients. The request body shape
-// (amount, date, type, checkAccount, checkAccountTransaction, createFeed)
-// is inferred from a community-maintained Go client's generated types.
-func (c *Client) BookVoucher(ctx context.Context, voucherID, transactionID string, amountCents int64) error {
+// Pass exact=false when the payment does not settle the voucher to the cent -
+// a foreign currency payment that came in a little over or under. The booking
+// is then recorded as a settlement with a difference instead of a partial
+// payment, which is what lets the voucher reach "Bezahlt".
+func (c *Client) BookVoucher(ctx context.Context, voucherID, transactionID string, amountCents int64, exact bool) error {
+	// bookAmount requires the check account the transaction belongs to, which
+	// only the transaction itself knows.
 	tx, err := c.transaction(ctx, transactionID)
 	if err != nil {
 		return fmt.Errorf("sevdesk: book voucher %s: look up transaction %s: %w", voucherID, transactionID, err)
 	}
 
+	bookingType := BookingOther
+	if exact {
+		bookingType = BookingFull
+	}
 	body := bookAmountRequest{
-		Amount:                  centsToAmount(amountCents),
-		Date:                    time.Now().Format("2006-01-02"),
-		Type:                    "N",
+		Amount:                  amount(amountCents),
+		Date:                    sevDate(time.Now().Format("2006-01-02")),
+		Type:                    bookingType,
 		CheckAccount:            tx.CheckAccount,
 		CheckAccountTransaction: ref{ID: transactionID, ObjectName: "CheckAccountTransaction"},
 		CreateFeed:              true,
@@ -567,31 +666,27 @@ func (c *Client) BookVoucher(ctx context.Context, voucherID, transactionID strin
 	return nil
 }
 
-// CreateFXVoucher books a currency-conversion gain or loss as its own
-// voucher. account is the SKR-04 account to book against and
-// amountCents is always positive; gain selects between
-// "Erlös aus Währungsumrechnung" and "Verlust aus Währungsumrechnung".
+// CreateFXVoucher books a currency conversion gain or loss as its own voucher.
+// account is the SKR-04 account to book against, amountCents is always
+// positive, and gain selects between "Erlös aus Währungsumrechnung" (we paid
+// less than invoiced, so it is revenue) and "Verlust aus Währungsumrechnung"
+// (we paid more, so it is an expense).
 func (c *Client) CreateFXVoucher(ctx context.Context, account, currency string, amountCents int64, gain bool, date string) (string, error) {
 	if amountCents < 0 {
 		return "", errors.New("sevdesk: CreateFXVoucher: amountCents must be positive")
 	}
 
-	desc := "Verlust aus Währungsumrechnung"
-	// NOTE: creditDebit "C"/"D" for a gain vs. a loss position is inferred
-	// by analogy with CreateVoucher's expense booking ("C"); sevDesk's own
-	// docs for which side a currency-conversion gain belongs on were not
-	// reachable while writing this client.
-	creditDebit := "D"
+	// "D" is a debit: we sold something. A conversion gain is revenue, a
+	// conversion loss is an expense and therefore a credit.
+	description, creditDebit := "Verlust aus Währungsumrechnung", "C"
 	if gain {
-		desc = "Erlös aus Währungsumrechnung"
-		creditDebit = "C"
+		description, creditDebit = "Erlös aus Währungsumrechnung", "D"
 	}
 
-	acc, err := c.resolveAccountDatev(ctx, account)
+	acc, err := c.resolveAccount(ctx, account)
 	if err != nil {
 		return "", err
 	}
-
 	v := voucherSave{
 		ObjectName:   "Voucher",
 		MapAll:       true,
@@ -599,18 +694,21 @@ func (c *Client) CreateFXVoucher(ctx context.Context, account, currency string, 
 		CreditDebit:  creditDebit,
 		VoucherType:  "VOU",
 		TaxType:      "default",
-		VoucherDate:  date,
-		SupplierName: desc,
-		Description:  desc,
+		TaxRule:      acc.taxRule(TaxRuleStandard),
+		VoucherDate:  sevDate(date),
+		SupplierName: description,
+		Description:  description,
 		Currency:     currency,
 	}
+	// A conversion difference carries no VAT.
 	pos := voucherPosSave{
 		ObjectName:   "VoucherPos",
 		MapAll:       true,
-		AccountDatev: acc,
+		AccountDatev: acc.ref,
 		TaxRate:      0,
-		Net:          centsToAmount(amountCents),
-		Sum:          centsToAmount(amountCents),
+		Net:          false,
+		SumNet:       amount(amountCents),
+		SumGross:     amount(amountCents),
 	}
 
 	id, err := c.createVoucher(ctx, v, pos, "")
