@@ -1,0 +1,48 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 394 >>
+stream
+BT
+/F1 11 Tf
+50 780 Td
+13 TL
+(Musterlieferant GmbH) Tj T*
+(Hauptstrasse 5, 10115 Berlin) Tj T*
+(USt-IdNr.: DE123456789) Tj T*
+() Tj T*
+(Rechnung) Tj T*
+() Tj T*
+(Rechnungs-Nr.: RE-2026-0042) Tj T*
+(Rechnungsdatum: 14.03.2026) Tj T*
+() Tj T*
+(Beratung                     1.000,00 EUR) Tj T*
+(MwSt. 19%                      190,00 EUR) Tj T*
+(Gesamtbetrag                 1.190,00 EUR) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000685 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+782
+%%EOF

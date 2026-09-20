@@ -1,0 +1,23 @@
+{{define "content"}}
+{{template "status" .}}
+
+<h2>Verlauf</h2>
+<div class="card">{{template "invoices" .}}</div>
+
+<h2>Letzte Ereignisse</h2>
+<div class="card">
+  <table class="events">
+    <tbody>
+    {{range .Events}}
+      <tr>
+        <td class="note">{{datetime .TS}}</td>
+        <td class="{{if eq .Level "error"}}bad{{else if eq .Level "warn"}}warn{{end}}">{{.Module}}</td>
+        <td>{{.Message}}</td>
+      </tr>
+    {{else}}
+      <tr><td class="note">Noch keine Ereignisse.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

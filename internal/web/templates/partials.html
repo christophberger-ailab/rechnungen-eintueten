@@ -1,0 +1,75 @@
+{{define "status"}}
+<div id="status" {{if .Running}}hx-get="/partials/status" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+  <div class="counts">
+    {{$counts := .Counts}}
+    {{range statuses}}
+    <div class="count">
+      <b class="{{class .}}">{{index $counts .}}</b>
+      <span class="note">{{label .}}</span>
+    </div>
+    {{end}}
+  </div>
+  <div class="card">
+    {{if .Running}}
+      <button disabled>Verarbeitung läuft …</button>
+      <span class="note">Die Seite aktualisiert sich automatisch.</span>
+    {{else}}
+      <button hx-post="/run" hx-target="#status" hx-swap="outerHTML">Verarbeitung starten</button>
+    {{end}}
+    {{with .LastRun}}
+      <p class="note">Letzter Lauf ({{.Trigger}}): {{datetime .StartedAt}} –
+        {{if eq .Status "running"}}läuft{{else}}{{.Status}}{{end}}.
+        {{.Found}} neu, {{.Processed}} verarbeitet, {{.Failed}} mit Fehlern.
+        {{with .Summary}}<br>{{.}}{{end}}</p>
+    {{else}}
+      <p class="note">Bisher wurde noch nichts verarbeitet.</p>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
+{{define "invoices"}}
+<table id="invoices" {{if .Running}}hx-get="/partials/invoices" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+  <thead>
+    <tr>
+      <th>Eingang</th><th>Lieferant</th><th>Nummer</th><th>Datum</th>
+      <th class="num">Betrag</th><th>Status</th><th>DATEV</th><th>sevDesk</th><th>Quelle</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Invoices}}
+    <tr>
+      <td>{{datetime .ReceivedAt}}</td>
+      <td><a href="/invoices/{{.ID}}">{{orDash .SenderName}}</a></td>
+      <td>{{orDash .Number}}</td>
+      <td>{{orDash .Date}}</td>
+      <td class="num">{{if .TotalCents}}{{money .TotalCents}} {{.Currency}}{{else}}–{{end}}</td>
+      <td><span class="tag {{class .Status}}">{{label .Status}}</span></td>
+      <td class="note">{{orDash .DatevState}}</td>
+      <td class="note">{{orDash .SevDeskState}}</td>
+      <td class="note">{{orDash .Method}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="9" class="note">Noch keine Rechnungen erfasst.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{define "senders"}}
+<table>
+  <thead><tr><th>E-Mail</th><th>Name</th><th>SKR-04</th><th>Aktiv</th><th></th></tr></thead>
+  <tbody>
+  {{range .Senders}}
+    <tr>
+      <td>{{.Email}}</td><td>{{orDash .Name}}</td><td>{{orDash .SKR04}}</td>
+      <td>{{if .Active}}ja{{else}}nein{{end}}</td>
+      <td><form method="post" action="/senders/{{.ID}}/delete">
+        <button class="ghost" type="submit">Löschen</button></form></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="note">Noch keine Absender hinterlegt.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

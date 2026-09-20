@@ -1,0 +1,13 @@
+{{define "content"}}
+<div class="card" style="max-width:24rem;margin:3rem auto">
+  <h2 style="margin-top:0">Anmelden</h2>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label for="password">Passwort</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+    <p><button type="submit">Anmelden</button></p>
+  </form>
+  <p class="note">Es gibt nur ein Passwort für diese Installation. Wer es vergessen hat,
+    setzt auf dem Server <code>rechnungen passwort</code> ab.</p>
+</div>
+{{end}}
