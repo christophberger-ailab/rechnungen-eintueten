@@ -1,4 +1,20 @@
-# rechnungen-eintueten
+# Rechnungen Eintüten
+
+Rechnungen Eintüten ist ein Tool, das 
+
+- Eingangrechnungen aus meinen Emails fischt
+- Sie zu Datev weiterschickt
+- Die Rechnungsdaten ausliest
+- Die Rechnungen nach SevDesk hochlädt und mit vorhandenen Zahlungen verknüpft
+- Die Rechnungen im lokalen Dateisystem ablegt
+
+Rechnungen Eintüten hat ein Web UI, um den Status, die Historie der Rechnungsverarbeitung und die Konfiguration bequem einzusehen. 
+
+Die Funktionen sind stark auf meinen Rechnungsworkflow und meine Tools zugeschnitten; der Besucher dieses Repos ist jedoch eingeladen, Teile nach Belieben zu nutzen und umzuformen.
+
+Das Tool wurde von einem LLM geschrieben; alles weitere in diesem README ist LLM-generiert.
+
+---
 
 Automates incoming invoices (Rechnungseingang) end to end: read them from a
 mailbox, extract the invoice data, file the original in the bookkeeping tree,
