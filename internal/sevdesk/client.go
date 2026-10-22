@@ -1,15 +1,20 @@
-// Package sevdesk implements a minimal client for the sevDesk REST API v1
+// Package sevdesk implements a minimal client for the sevDesk REST API
 // (https://api.sevdesk.de/), covering the parts needed to file supplier
 // invoices (Vouchers) as PDF attachments and reconcile them against bank
 // transactions.
 //
-// It follows sevDesk's OpenAPI description. Two of its habits shape the code
-// below: responses wrap their payload in {"objects": ...} and return numbers
-// and status codes as JSON strings, while requests take object references as
-// {"id": "...", "objectName": "..."} and amounts as JSON numbers.
+// It follows sevDesk's OpenAPI description 2.0.0 (sevdesk-openapi-2.0.0.yaml
+// in this directory). "2.0" names sevDesk's bookkeeping system, not a URL
+// prefix: the API is still served under /api/v1. Two of its habits shape the
+// code below: responses wrap their payload in {"objects": ...} and return
+// numbers and status codes as JSON strings, while requests take amounts as
+// JSON numbers and object references as {"id": ..., "objectName": "..."}, with
+// the id a JSON number for every object but the TaxRule.
 //
-// The client targets sevdesk-Update 2.0, which books voucher positions to an
-// accountDatev and states the VAT regulation as a taxRule.
+// The client speaks sevdesk-Update 2.0 only: voucher positions are booked to
+// an accountDatev and the VAT regulation is a taxRule. The 1.0 counterparts
+// (accountingType, taxType, taxSet) are never sent, and an account that has not
+// received the update is refused up front, see checkBookkeepingSystem.
 package sevdesk
 
 import (
@@ -26,6 +31,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,11 +40,15 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	mu          sync.Mutex
+	bookkeeping bool // the account is on bookkeeping system 2.0; checked once
 }
 
 // New returns a Client for the given base URL and API token. The token is
 // sent as-is in the Authorization header (no "Bearer " prefix, as sevDesk
-// expects). An empty baseURL defaults to "https://my.sevdesk.de/api/v1".
+// expects). An empty baseURL defaults to "https://my.sevdesk.de/api/v1", the
+// server the OpenAPI description 2.0.0 names.
 func New(baseURL, token string) *Client {
 	if baseURL == "" {
 		baseURL = "https://my.sevdesk.de/api/v1"
@@ -65,11 +75,28 @@ const (
 	StatusTransactionBooked  = 400
 )
 
-// ref is an object reference as sevDesk expects it in request bodies and
-// returns it in responses: {"id": "...", "objectName": "..."}.
+// ref is an object reference as sevDesk returns it in responses, and as it
+// takes a TaxRule in requests: {"id": "...", "objectName": "..."}.
 type ref struct {
 	ID         string `json:"id"`
 	ObjectName string `json:"objectName"`
+}
+
+// intRef is an object reference in a request body, where the OpenAPI
+// description types the id of an AccountDatev, CheckAccount or
+// CheckAccountTransaction as an integer: {"id": 4711, "objectName": "..."}.
+type intRef struct {
+	ID         int64  `json:"id"`
+	ObjectName string `json:"objectName"`
+}
+
+// newIntRef builds an intRef from the string id a response carries.
+func newIntRef(id, objectName string) (intRef, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return intRef{}, fmt.Errorf("%s id %q is not a number", objectName, id)
+	}
+	return intRef{ID: n, ObjectName: objectName}, nil
 }
 
 // Voucher is a supplier invoice (Beleg) in sevDesk.
@@ -357,12 +384,43 @@ func (c *Client) uploadTempFile(ctx context.Context, path string) (string, error
 	return out.Objects.Filename, nil
 }
 
+// checkBookkeepingSystem fails unless the account has received sevdesk-Update
+// 2.0, the only generation this client builds requests for. Without it, a 1.0
+// account answers a voucher with a validation error that does not say why.
+//
+// Endpoint: GET /Tools/bookkeepingSystemVersion. Only a positive answer is
+// remembered, so a failed check is repeated on the next call.
+func (c *Client) checkBookkeepingSystem(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bookkeeping {
+		return nil
+	}
+	var out struct {
+		Objects struct {
+			Version string `json:"version"`
+		} `json:"objects"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/Tools/bookkeepingSystemVersion", nil, nil, &out); err != nil {
+		return fmt.Errorf("sevdesk: check bookkeeping system version: %w", err)
+	}
+	if out.Objects.Version != "2.0" {
+		return fmt.Errorf("sevdesk: the account is on bookkeeping system %q, but this client needs sevdesk-Update 2.0",
+			out.Objects.Version)
+	}
+	c.bookkeeping = true
+	return nil
+}
+
 // account is a booking account as sevDesk knows it, together with the tax
 // rules it permits.
 type account struct {
-	ref        ref
+	datevID    int64 // id of the AccountDatev, not the DATEV account number
 	taxRuleIDs []string
 }
+
+// ref is the account as a voucher position references it.
+func (a account) ref() intRef { return intRef{ID: a.datevID, ObjectName: "AccountDatev"} }
 
 // resolveAccount looks up the internal AccountDatev reference for an SKR-04
 // account number. Voucher positions reference the account by sevDesk's own id,
@@ -388,7 +446,11 @@ func (c *Client) resolveAccount(ctx context.Context, skr04 string) (account, err
 		return account{}, fmt.Errorf("sevdesk: no accounting guidance for SKR04 account %s", skr04)
 	}
 	first := out.Objects[0]
-	acc := account{ref: ref{ID: first.AccountDatevID.String(), ObjectName: "AccountDatev"}}
+	datevID, err := first.AccountDatevID.Int64()
+	if err != nil {
+		return account{}, fmt.Errorf("sevdesk: SKR04 account %s: unusable accountDatevId %q", skr04, first.AccountDatevID)
+	}
+	acc := account{datevID: datevID}
 	for _, rule := range first.AllowedTaxRules {
 		acc.taxRuleIDs = append(acc.taxRuleIDs, rule.ID.String())
 	}
@@ -416,20 +478,54 @@ func (a account) taxRule(preferred string) ref {
 }
 
 // voucherSave is the "voucher" half of a Voucher/Factory/saveVoucher request.
-// taxType belongs to sevdesk-Update 1.0 and taxRule to 2.0; both are sent so
-// the same request works on either generation of account.
+//
+// The VAT regulation is the taxRule of sevdesk-Update 2.0. Its 1.0 forerunners
+// taxType and taxSet are left out on purpose: the two would contradict each
+// other as soon as the rule is anything but the standard one.
 type voucherSave struct {
 	ObjectName   string `json:"objectName"`
 	MapAll       bool   `json:"mapAll"`
 	Status       int    `json:"status"`      // 50 draft, 100 open
 	CreditDebit  string `json:"creditDebit"` // "C" credit: we bought; "D" debit: we sold
 	VoucherType  string `json:"voucherType"` // "VOU" for a regular voucher
-	TaxType      string `json:"taxType"`
 	TaxRule      ref    `json:"taxRule"`
-	VoucherDate  string `json:"voucherDate"` // dd.mm.yyyy
+	VoucherDate  string `json:"voucherDate"`            // dd.mm.yyyy
+	DeliveryDate string `json:"deliveryDate,omitempty"` // dd.mm.yyyy
 	SupplierName string `json:"supplierName"`
 	Description  string `json:"description"` // the supplier's invoice number
 	Currency     string `json:"currency,omitempty"`
+	// ForeignCurrencyDeadline is the day whose exchange rate sevDesk applies. A
+	// voucher in any currency but the account's own is rejected without it (or
+	// without a propertyExchangeRate, which we do not know).
+	ForeignCurrencyDeadline string `json:"propertyForeignCurrencyDeadline,omitempty"` // dd.mm.yyyy
+}
+
+// newVoucherSave fills the voucher half of a saveVoucher request for an open
+// voucher dated isoDate (YYYY-MM-DD).
+//
+// sevDesk files the delivery date (Leistungsdatum) of a voucher under "strongly
+// recommended for valid bookkeeping", and an invoice we only know by its date
+// has no other, so it is set to the voucher date - what sevDesk's own form
+// proposes. For the same reason the exchange rate of a foreign currency is
+// taken from that day.
+func newVoucherSave(creditDebit string, taxRule ref, isoDate, supplierName, description, currency string) voucherSave {
+	v := voucherSave{
+		ObjectName:   "Voucher",
+		MapAll:       true,
+		Status:       StatusOpen,
+		CreditDebit:  creditDebit,
+		VoucherType:  "VOU",
+		TaxRule:      taxRule,
+		VoucherDate:  sevDate(isoDate),
+		DeliveryDate: sevDate(isoDate),
+		SupplierName: supplierName,
+		Description:  description,
+		Currency:     currency,
+	}
+	if foreign(currency, "") {
+		v.ForeignCurrencyDeadline = sevDate(isoDate)
+	}
+	return v
 }
 
 // voucherPosSave is one entry of the "voucherPosSave" array of a
@@ -439,13 +535,13 @@ type voucherSave struct {
 // sumGross. We extract the gross total from the invoice, so it stays false.
 //
 // The position references its booking account through accountDatev, which is
-// the sevdesk-Update 2.0 form. Accounts still on 1.0 expect an accountingType
-// instead, whose ids live in a different namespace - sending a wrong one is
-// worse than sending none, so it is left out.
+// the sevdesk-Update 2.0 form. The 1.0 accountingType, whose ids live in a
+// different namespace, is left out; the OpenAPI description lists both as
+// required, but only because it describes both generations at once.
 type voucherPosSave struct {
 	ObjectName   string  `json:"objectName"`
 	MapAll       bool    `json:"mapAll"`
-	AccountDatev ref     `json:"accountDatev"`
+	AccountDatev intRef  `json:"accountDatev"`
 	TaxRate      float64 `json:"taxRate"`
 	Net          bool    `json:"net"`
 	SumNet       float64 `json:"sumNet"`
@@ -499,6 +595,10 @@ func (c *Client) createVoucher(ctx context.Context, v voucherSave, pos voucherPo
 // CreateVoucher uploads the PDF, then creates a voucher in status "Offen"
 // with one position booked to the given SKR-04 account. Returns the voucher id.
 func (c *Client) CreateVoucher(ctx context.Context, in VoucherInput) (string, error) {
+	// Check first, so a refused account does not leave an uploaded file behind.
+	if err := c.checkBookkeepingSystem(ctx); err != nil {
+		return "", err
+	}
 	filename, err := c.uploadTempFile(ctx, in.FilePath)
 	if err != nil {
 		return "", err
@@ -512,23 +612,12 @@ func (c *Client) CreateVoucher(ctx context.Context, in VoucherInput) (string, er
 		taxRule = TaxRuleStandard
 	}
 
-	v := voucherSave{
-		ObjectName:   "Voucher",
-		MapAll:       true,
-		Status:       StatusOpen,
-		CreditDebit:  "C", // an incoming invoice: we bought something
-		VoucherType:  "VOU",
-		TaxType:      "default",
-		TaxRule:      acc.taxRule(taxRule),
-		VoucherDate:  sevDate(in.Date),
-		SupplierName: in.SupplierName,
-		Description:  in.Number,
-		Currency:     in.Currency,
-	}
+	// "C": an incoming invoice, we bought something.
+	v := newVoucherSave("C", acc.taxRule(taxRule), in.Date, in.SupplierName, in.Number, in.Currency)
 	pos := voucherPosSave{
 		ObjectName:   "VoucherPos",
 		MapAll:       true,
-		AccountDatev: acc.ref,
+		AccountDatev: acc.ref(),
 		TaxRate:      in.VATRate,
 		Net:          false, // we know the gross total, so sumGross is what counts
 		SumNet:       amount(in.TotalCents - in.VATCents),
@@ -613,13 +702,15 @@ func (c *Client) transaction(ctx context.Context, id string) (apiTransaction, er
 	return out.Objects[0], nil
 }
 
-// bookAmountRequest is the body of PUT /Voucher/{id}/bookAmount.
+// bookAmountRequest is the body of PUT /Voucher/{id}/bookAmount. The date is
+// the one field the description types as a date-time rather than allowing
+// dd.mm.yyyy as well, so it is sent as an RFC 3339 timestamp.
 type bookAmountRequest struct {
 	Amount                  float64 `json:"amount"`
 	Date                    string  `json:"date"`
 	Type                    string  `json:"type"`
-	CheckAccount            ref     `json:"checkAccount"`
-	CheckAccountTransaction ref     `json:"checkAccountTransaction"`
+	CheckAccount            intRef  `json:"checkAccount"`
+	CheckAccountTransaction intRef  `json:"checkAccountTransaction"`
 	CreateFeed              bool    `json:"createFeed"`
 }
 
@@ -646,16 +737,25 @@ func (c *Client) BookVoucher(ctx context.Context, voucherID, transactionID strin
 		return fmt.Errorf("sevdesk: book voucher %s: look up transaction %s: %w", voucherID, transactionID, err)
 	}
 
+	checkAccount, err := newIntRef(tx.CheckAccount.ID, "CheckAccount")
+	if err != nil {
+		return fmt.Errorf("sevdesk: book voucher %s: transaction %s: %w", voucherID, transactionID, err)
+	}
+	transaction, err := newIntRef(transactionID, "CheckAccountTransaction")
+	if err != nil {
+		return fmt.Errorf("sevdesk: book voucher %s: %w", voucherID, err)
+	}
+
 	bookingType := BookingOther
 	if exact {
 		bookingType = BookingFull
 	}
 	body := bookAmountRequest{
 		Amount:                  amount(amountCents),
-		Date:                    sevDate(time.Now().Format("2006-01-02")),
+		Date:                    time.Now().Format(time.RFC3339),
 		Type:                    bookingType,
-		CheckAccount:            tx.CheckAccount,
-		CheckAccountTransaction: ref{ID: transactionID, ObjectName: "CheckAccountTransaction"},
+		CheckAccount:            checkAccount,
+		CheckAccountTransaction: transaction,
 		CreateFeed:              true,
 	}
 
@@ -683,28 +783,19 @@ func (c *Client) CreateFXVoucher(ctx context.Context, account, currency string, 
 		description, creditDebit = "Erlös aus Währungsumrechnung", "D"
 	}
 
+	if err := c.checkBookkeepingSystem(ctx); err != nil {
+		return "", err
+	}
 	acc, err := c.resolveAccount(ctx, account)
 	if err != nil {
 		return "", err
 	}
-	v := voucherSave{
-		ObjectName:   "Voucher",
-		MapAll:       true,
-		Status:       StatusOpen,
-		CreditDebit:  creditDebit,
-		VoucherType:  "VOU",
-		TaxType:      "default",
-		TaxRule:      acc.taxRule(TaxRuleStandard),
-		VoucherDate:  sevDate(date),
-		SupplierName: description,
-		Description:  description,
-		Currency:     currency,
-	}
+	v := newVoucherSave(creditDebit, acc.taxRule(TaxRuleStandard), date, description, description, currency)
 	// A conversion difference carries no VAT.
 	pos := voucherPosSave{
 		ObjectName:   "VoucherPos",
 		MapAll:       true,
-		AccountDatev: acc.ref,
+		AccountDatev: acc.ref(),
 		TaxRate:      0,
 		Net:          false,
 		SumNet:       amount(amountCents),

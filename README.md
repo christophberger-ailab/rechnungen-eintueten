@@ -27,10 +27,14 @@ and its database file.
 ## Status
 
 All modules are implemented and covered by tests. The sevDesk client follows
-sevDesk's own OpenAPI description and targets **sevdesk-Update 2.0**, which
-books voucher positions to an `accountDatev` and states the VAT regulation as
-a `taxRule`. Accounts still on Update 1.0 expect an `accountingType` instead,
-whose ids live in a different namespace; that form is not implemented.
+sevDesk's own OpenAPI description 2.0.0 (kept in
+`internal/sevdesk/sevdesk-openapi-2.0.0.yaml`) and targets **sevdesk-Update
+2.0**, which books voucher positions to an `accountDatev` and states the VAT
+regulation as a `taxRule`. Accounts still on Update 1.0 expect an
+`accountingType` and a `taxType` instead; that form is not implemented, and
+the client asks `/Tools/bookkeepingSystemVersion` before creating a voucher
+and refuses such an account. "2.0" names the bookkeeping system, not the URL:
+the API is still served under `/api/v1`, as the description says.
 
 Still worth a dry run on a test account before the first real upload: the
 requests match the spec and are tested against a stub server, but no call in
@@ -45,7 +49,7 @@ go install ./cmd/rechnungen
 rechnungen sender rechnung@lieferant.de 6815 "Muster Lieferant"
 
 # Configure the rest in the browser.
-rechnungen serve            # web UI on :8080, daily run at 03:00
+rechnungen serve            # daily updates at 03:00 while running
 ```
 
 For a cron setup, skip the server and run the pipeline directly (assuming `rechnungen` is installed in `/opt/rechnungen/`):

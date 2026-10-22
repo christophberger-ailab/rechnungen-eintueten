@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCentsToAmount(t *testing.T) {
@@ -60,9 +61,14 @@ func TestAmount(t *testing.T) {
 	}
 }
 
+// bookkeeping2 answers GET /Tools/bookkeepingSystemVersion for an account that
+// has received sevdesk-Update 2.0.
+const bookkeeping2 = `{"objects":{"version":"2.0"}}`
+
 // TestCreateVoucher checks the request against the shapes the sevDesk OpenAPI
-// description defines: the token header, the upload, the account lookup, the
-// required taxRule, the German date format and the position amounts.
+// description defines: the token header, the version check, the upload, the
+// account lookup, the taxRule that replaces taxType, the German date format,
+// the integer account id and the position amounts.
 func TestCreateVoucher(t *testing.T) {
 	var seen []string
 	var accountQuery string
@@ -75,6 +81,8 @@ func TestCreateVoucher(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/Tools/bookkeepingSystemVersion":
+			w.Write([]byte(bookkeeping2))
 		case "/Voucher/Factory/uploadTempFile":
 			w.Write([]byte(`{"objects":{"filename":"tmp-1.pdf","mimeType":"application/pdf"}}`))
 		case "/ReceiptGuidance/forAccountNumber":
@@ -126,9 +134,19 @@ func TestCreateVoucher(t *testing.T) {
 	if voucher["voucherDate"] != "14.03.2026" {
 		t.Errorf("voucherDate = %v, want the documented dd.mm.yyyy form", voucher["voucherDate"])
 	}
+	if voucher["deliveryDate"] != "14.03.2026" {
+		t.Errorf("deliveryDate = %v, want the voucher date", voucher["deliveryDate"])
+	}
 	taxRule, _ := voucher["taxRule"].(map[string]any)
 	if taxRule["id"] != "1" || taxRule["objectName"] != "TaxRule" {
 		t.Errorf("taxRule = %v, want the standard rule the account allows", voucher["taxRule"])
+	}
+	// taxType is the 1.0 spelling of taxRule; sending both lets them disagree.
+	if _, ok := voucher["taxType"]; ok {
+		t.Errorf("voucher carries taxType %v next to its taxRule", voucher["taxType"])
+	}
+	if _, ok := voucher["propertyForeignCurrencyDeadline"]; ok {
+		t.Errorf("a EUR voucher carries a foreign currency deadline: %v", voucher)
 	}
 
 	positions, _ := saved["voucherPosSave"].([]any)
@@ -145,12 +163,19 @@ func TestCreateVoucher(t *testing.T) {
 	if pos["taxRate"] != 19.0 {
 		t.Errorf("taxRate = %v", pos["taxRate"])
 	}
+	// The description types the id as an integer, so it must not be quoted.
 	account, _ := pos["accountDatev"].(map[string]any)
-	if account["id"] != "4711" || account["objectName"] != "AccountDatev" {
+	if account["id"] != 4711.0 || account["objectName"] != "AccountDatev" {
 		t.Errorf("accountDatev = %v", pos["accountDatev"])
+	}
+	if _, ok := pos["accountingType"]; ok {
+		t.Errorf("the position carries the 1.0 accountingType: %v", pos["accountingType"])
 	}
 	if pos["sum"] != nil {
 		t.Errorf("the position carries a \"sum\" field, which the API does not define")
+	}
+	if len(seen) == 0 || seen[0] != "/Tools/bookkeepingSystemVersion" {
+		t.Errorf("requests = %v, want the version check first", seen)
 	}
 }
 
@@ -161,6 +186,8 @@ func TestCreateVoucherFallsBackToAnAllowedTaxRule(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/Tools/bookkeepingSystemVersion":
+			w.Write([]byte(bookkeeping2))
 		case "/Voucher/Factory/uploadTempFile":
 			w.Write([]byte(`{"objects":{"filename":"tmp-1.pdf"}}`))
 		case "/ReceiptGuidance/forAccountNumber":
@@ -188,6 +215,109 @@ func TestCreateVoucherFallsBackToAnAllowedTaxRule(t *testing.T) {
 	taxRule, _ := voucher["taxRule"].(map[string]any)
 	if taxRule["id"] != "5" {
 		t.Errorf("taxRule = %v, want the only rule the account allows", voucher["taxRule"])
+	}
+}
+
+// voucherStub serves everything CreateVoucher needs and records the requests
+// it receives and the saveVoucher body. version is what the account answers to
+// the bookkeeping system check.
+func voucherStub(t *testing.T, version string, hits *[]string, saved *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*hits = append(*hits, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/Tools/bookkeepingSystemVersion":
+			w.Write([]byte(`{"objects":{"version":"` + version + `"}}`))
+		case "/Voucher/Factory/uploadTempFile":
+			w.Write([]byte(`{"objects":{"filename":"tmp-1.pdf"}}`))
+		case "/ReceiptGuidance/forAccountNumber":
+			w.Write([]byte(`{"objects":[{"accountDatevId":4711,"allowedTaxRules":[{"id":1}]}]}`))
+		case "/Voucher/Factory/saveVoucher":
+			json.NewDecoder(r.Body).Decode(saved)
+			w.Write([]byte(`{"voucher":{"id":"9001"}}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func writePDF(t *testing.T) string {
+	t.Helper()
+	pdf := filepath.Join(t.TempDir(), "rechnung.pdf")
+	if err := os.WriteFile(pdf, []byte("%PDF-1.4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return pdf
+}
+
+// TestCreateVoucherInForeignCurrency covers the rule that a voucher in another
+// currency than the account's needs an exchange rate: sevDesk takes the rate of
+// the day named by propertyForeignCurrencyDeadline.
+func TestCreateVoucherInForeignCurrency(t *testing.T) {
+	var hits []string
+	var saved map[string]any
+	stub := voucherStub(t, "2.0", &hits, &saved)
+	defer stub.Close()
+
+	_, err := New(stub.URL, "t").CreateVoucher(context.Background(), VoucherInput{
+		FilePath: writePDF(t), Number: "INV-1", Date: "2026-03-14", Currency: "USD",
+		SKR04: "6815", TotalCents: 11900, VATRate: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	voucher, _ := saved["voucher"].(map[string]any)
+	if voucher["currency"] != "USD" || voucher["propertyForeignCurrencyDeadline"] != "14.03.2026" {
+		t.Errorf("voucher = %v, want USD with the exchange rate day 14.03.2026", voucher)
+	}
+}
+
+// TestCreateVoucherRefusesBookkeepingSystem1 checks that an account without
+// sevdesk-Update 2.0 is turned away before anything is uploaded or created.
+func TestCreateVoucherRefusesBookkeepingSystem1(t *testing.T) {
+	var hits []string
+	var saved map[string]any
+	stub := voucherStub(t, "1.0", &hits, &saved)
+	defer stub.Close()
+
+	_, err := New(stub.URL, "t").CreateVoucher(context.Background(), VoucherInput{
+		FilePath: writePDF(t), Number: "RE-1", Date: "2026-03-14", SKR04: "6815", TotalCents: 100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "2.0") {
+		t.Fatalf("err = %v, want a refusal that names sevdesk-Update 2.0", err)
+	}
+	if len(hits) != 1 || saved != nil {
+		t.Errorf("requests = %v, saved = %v: only the version check should have gone out", hits, saved)
+	}
+}
+
+// TestBookkeepingSystemIsCheckedOnce keeps the pre-flight from costing a request
+// per voucher.
+func TestBookkeepingSystemIsCheckedOnce(t *testing.T) {
+	var hits []string
+	var saved map[string]any
+	stub := voucherStub(t, "2.0", &hits, &saved)
+	defer stub.Close()
+
+	client := New(stub.URL, "t")
+	for i := 0; i < 3; i++ {
+		_, err := client.CreateVoucher(context.Background(), VoucherInput{
+			FilePath: writePDF(t), Number: "RE", Date: "2026-03-14", SKR04: "6815", TotalCents: 100,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	checks := 0
+	for _, h := range hits {
+		if h == "/Tools/bookkeepingSystemVersion" {
+			checks++
+		}
+	}
+	if checks != 1 {
+		t.Errorf("version checks = %d over three vouchers, want 1", checks)
 	}
 }
 
@@ -316,15 +446,42 @@ func TestBookVoucher(t *testing.T) {
 				t.Errorf("amount = %v, want the number 1085", body["amount"])
 			}
 			// The check account is required and only the transaction knows it.
+			// Both ids are integers in a request, although a response quotes them.
 			checkAccount, _ := body["checkAccount"].(map[string]any)
-			if checkAccount["id"] != "5" {
+			if checkAccount["id"] != 5.0 || checkAccount["objectName"] != "CheckAccount" {
 				t.Errorf("checkAccount = %v", body["checkAccount"])
 			}
 			transaction, _ := body["checkAccountTransaction"].(map[string]any)
-			if transaction["id"] != "77" || transaction["objectName"] != "CheckAccountTransaction" {
+			if transaction["id"] != 77.0 || transaction["objectName"] != "CheckAccountTransaction" {
 				t.Errorf("checkAccountTransaction = %v", body["checkAccountTransaction"])
 			}
+			// The booking date is a date-time in the description.
+			date, _ := body["date"].(string)
+			if _, err := time.Parse(time.RFC3339, date); err != nil {
+				t.Errorf("date = %q, want an RFC 3339 timestamp: %v", body["date"], err)
+			}
 		})
+	}
+}
+
+// TestBookVoucherNeedsNumericIDs: the ids go out as integers, so one that is
+// not a number must stop the booking instead of reaching sevDesk as 0.
+func TestBookVoucherNeedsNumericIDs(t *testing.T) {
+	var booked bool
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			booked = true
+		}
+		w.Write([]byte(`{"objects":[{"id":"77","status":"100","checkAccount":{"id":"","objectName":"CheckAccount"}}]}`))
+	}))
+	defer stub.Close()
+
+	err := New(stub.URL, "t").BookVoucher(context.Background(), "9001", "77", 100, true)
+	if err == nil || !strings.Contains(err.Error(), "CheckAccount") {
+		t.Errorf("err = %v, want a complaint about the check account id", err)
+	}
+	if booked {
+		t.Error("the booking went out despite the missing check account")
 	}
 }
 
@@ -343,6 +500,8 @@ func TestCreateFXVoucherSides(t *testing.T) {
 			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
+				case "/Tools/bookkeepingSystemVersion":
+					w.Write([]byte(bookkeeping2))
 				case "/ReceiptGuidance/forAccountNumber":
 					w.Write([]byte(`{"objects":[{"accountDatevId":4840,"allowedTaxRules":[{"id":1}]}]}`))
 				case "/Voucher/Factory/saveVoucher":
@@ -367,6 +526,12 @@ func TestCreateFXVoucherSides(t *testing.T) {
 			}
 			if voucher["description"] != tc.wantDescription {
 				t.Errorf("description = %v, want %q", voucher["description"], tc.wantDescription)
+			}
+			if _, ok := voucher["taxType"]; ok {
+				t.Errorf("voucher carries the 1.0 taxType: %v", voucher["taxType"])
+			}
+			if voucher["propertyForeignCurrencyDeadline"] != "14.03.2026" {
+				t.Errorf("deadline = %v, want the USD voucher to name its exchange rate day", voucher["propertyForeignCurrencyDeadline"])
 			}
 			positions, _ := saved["voucherPosSave"].([]any)
 			pos, _ := positions[0].(map[string]any)
