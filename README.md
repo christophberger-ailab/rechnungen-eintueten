@@ -39,16 +39,16 @@ this repository has ever reached sevDesk itself.
 ## Quick start
 
 ```sh
-go build -o rechnungen ./cmd/rechnungen
+go install ./cmd/rechnungen
 
 # Tell it who sends invoices and which SKR-04 account they book to.
-./rechnungen sender rechnung@lieferant.de 6815 "Muster Lieferant"
+rechnungen sender rechnung@lieferant.de 6815 "Muster Lieferant"
 
 # Configure the rest in the browser.
-./rechnungen serve            # web UI on :8080, daily run at 03:00
+rechnungen serve            # web UI on :8080, daily run at 03:00
 ```
 
-For a cron setup, skip the server and run the pipeline directly:
+For a cron setup, skip the server and run the pipeline directly (assuming `rechnungen` is installed in `/opt/rechnungen/`):
 
 ```sh
 0 3 * * *  /opt/rechnungen/rechnungen -db /var/lib/rechnungen/rechnungen.db run
@@ -223,8 +223,8 @@ binary, so the UI works on a machine without internet access.
 ## Configuration
 
 All configuration lives in the `settings` table and is editable in the web UI
-or with `rechnungen config`. The struct tags in `internal/config/config.go`
-are the single source of truth — they drive loading, saving and the form.
+or with `rechnungen config`. The `bindings` table in `internal/config/config.go`
+is the single source of truth — it drives loading, saving and the form.
 
 | Group | Keys |
 |---|---|

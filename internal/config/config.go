@@ -1,68 +1,139 @@
-// Package config is the typed view of the settings table. The struct tags are
-// the single source of truth: they drive loading, saving and the settings form
-// rendered by the web UI.
+// Package config is the typed view of the settings table. The bindings table
+// is the single source of truth: it drives loading, saving and the settings
+// form rendered by the web UI.
 package config
 
 import (
 	"fmt"
-	"reflect"
+	"slices"
 	"strconv"
 )
 
-// Config holds every configurable value of the application.
+// Config holds every configurable value of the application. Every field needs
+// a line in bindings.
 type Config struct {
-	IMAPHost    string `cfg:"imap.host" group:"Mailbox (IMAP)" label:"Server"`
-	IMAPPort    int    `cfg:"imap.port" group:"Mailbox (IMAP)" label:"Port" default:"993"`
-	IMAPUser    string `cfg:"imap.user" group:"Mailbox (IMAP)" label:"Benutzer"`
-	IMAPPass    string `cfg:"imap.pass" group:"Mailbox (IMAP)" label:"Passwort" secret:"true"`
-	IMAPMailbox string `cfg:"imap.mailbox" group:"Mailbox (IMAP)" label:"Postfach" default:"INBOX"`
-	IMAPTLS     bool   `cfg:"imap.tls" group:"Mailbox (IMAP)" label:"TLS" default:"true"`
-	IMAPDays    int    `cfg:"imap.days" group:"Mailbox (IMAP)" label:"Zeitraum (Tage)" default:"30"`
+	IMAPHost    string
+	IMAPPort    int
+	IMAPUser    string
+	IMAPPass    string
+	IMAPMailbox string
+	IMAPTLS     bool
+	IMAPDays    int
 
-	SMTPHost string `cfg:"smtp.host" group:"Mailversand (SMTP)" label:"Server"`
-	SMTPPort int    `cfg:"smtp.port" group:"Mailversand (SMTP)" label:"Port" default:"587"`
-	SMTPUser string `cfg:"smtp.user" group:"Mailversand (SMTP)" label:"Benutzer"`
-	SMTPPass string `cfg:"smtp.pass" group:"Mailversand (SMTP)" label:"Passwort" secret:"true"`
-	SMTPFrom string `cfg:"smtp.from" group:"Mailversand (SMTP)" label:"Absenderadresse"`
+	SMTPHost string
+	SMTPPort int
+	SMTPUser string
+	SMTPPass string
+	SMTPFrom string
 
-	LLMBaseURL string `cfg:"llm.base_url" group:"LLM" label:"API Base URL" default:"https://api.anthropic.com/v1"`
-	LLMKey     string `cfg:"llm.api_key" group:"LLM" label:"API Key" secret:"true"`
-	LLMModel   string `cfg:"llm.model" group:"LLM" label:"Modell" default:"claude-opus-5"`
-	LLMKind    string `cfg:"llm.kind" group:"LLM" label:"API-Dialekt (anthropic|openai)" default:"anthropic"`
-	LLMTimeout int    `cfg:"llm.timeout" group:"LLM" label:"Timeout (s)" default:"120"`
+	LLMBaseURL string
+	LLMKey     string
+	LLMModel   string
+	LLMKind    string
+	LLMTimeout int
 
-	OCRBaseURL string `cfg:"ocr.base_url" group:"OCR" label:"API Base URL" default:"https://api.mistral.ai/v1"`
-	OCRKey     string `cfg:"ocr.api_key" group:"OCR" label:"API Key" secret:"true"`
-	OCRModel   string `cfg:"ocr.model" group:"OCR" label:"Modell" default:"mistral-ocr-latest"`
+	OCRBaseURL string
+	OCRKey     string
+	OCRModel   string
 
-	DatevTo      string `cfg:"datev.to" group:"DATEV" label:"DATEV-Empfangsadresse"`
-	DatevFrom    string `cfg:"datev.from" group:"DATEV" label:"Absenderadresse"`
-	DatevSubject string `cfg:"datev.subject" group:"DATEV" label:"Betreff-Vorlage" default:"Rechnungseingang {{number}}"`
-	DatevEnabled bool   `cfg:"datev.enabled" group:"DATEV" label:"Aktiv" default:"true"`
+	DatevTo      string
+	DatevFrom    string
+	DatevSubject string
+	DatevEnabled bool
 
-	SevDeskBaseURL string  `cfg:"sevdesk.base_url" group:"sevDesk" label:"API Base URL" default:"https://my.sevdesk.de/api/v1"`
-	SevDeskToken   string  `cfg:"sevdesk.token" group:"sevDesk" label:"API Token" secret:"true"`
-	SevDeskEnabled bool    `cfg:"sevdesk.enabled" group:"sevDesk" label:"Aktiv" default:"true"`
-	SevDeskTol     float64 `cfg:"sevdesk.fx_tolerance" group:"sevDesk" label:"FX-Toleranz (%)" default:"5"`
-	SevDeskTaxRule string  `cfg:"sevdesk.tax_rule" group:"sevDesk" label:"Steuerregel (1=USt-pflichtig, 5=Reverse Charge, 11=§19 UStG)" default:"1"`
-	SevDeskGain    string  `cfg:"sevdesk.gain_account" group:"sevDesk" label:"Konto Erlös Währungsumrechnung" default:"4840"`
-	SevDeskLoss    string  `cfg:"sevdesk.loss_account" group:"sevDesk" label:"Konto Verlust Währungsumrechnung" default:"6880"`
+	SevDeskBaseURL string
+	SevDeskToken   string
+	SevDeskEnabled bool
+	SevDeskTol     float64
+	SevDeskTaxRule string
+	SevDeskGain    string
+	SevDeskLoss    string
 
-	ArchiveDir string `cfg:"archive.base_dir" group:"Ablage" label:"Basisverzeichnis" default:"./FIBU"`
-	SpoolDir   string `cfg:"spool.dir" group:"Ablage" label:"Spool-Verzeichnis (Originale)" default:"./spool"`
+	ArchiveDir string
+	SpoolDir   string
 
-	BackupEnabled   bool   `cfg:"backup.enabled" group:"Backup (Litestream)" label:"Aktiv"`
-	BackupEndpoint  string `cfg:"backup.endpoint" group:"Backup (Litestream)" label:"S3-Endpoint" default:"https://fsn1.your-objectstorage.com"`
-	BackupRegion    string `cfg:"backup.region" group:"Backup (Litestream)" label:"Region" default:"fsn1"`
-	BackupBucket    string `cfg:"backup.bucket" group:"Backup (Litestream)" label:"Bucket"`
-	BackupPath      string `cfg:"backup.path" group:"Backup (Litestream)" label:"Pfad im Bucket" default:"rechnungen"`
-	BackupKeyID     string `cfg:"backup.access_key_id" group:"Backup (Litestream)" label:"Access Key ID" secret:"true"`
-	BackupSecret    string `cfg:"backup.secret_access_key" group:"Backup (Litestream)" label:"Secret Access Key" secret:"true"`
-	BackupPathStyle bool   `cfg:"backup.force_path_style" group:"Backup (Litestream)" label:"Path-Style-URLs" default:"true"`
-	BackupInterval  int    `cfg:"backup.sync_interval" group:"Backup (Litestream)" label:"Sync-Intervall (s)" default:"10"`
+	BackupEnabled   bool
+	BackupEndpoint  string
+	BackupRegion    string
+	BackupBucket    string
+	BackupPath      string
+	BackupKeyID     string
+	BackupSecret    string
+	BackupPathStyle bool
+	BackupInterval  int
 
-	DailyAt  string `cfg:"schedule.daily_at" group:"Ablauf" label:"Tägliche Ausführung (HH:MM)" default:"03:00"`
-	HTTPAddr string `cfg:"http.addr" group:"Ablauf" label:"Web-UI Adresse" default:":8080"`
+	DailyAt  string
+	HTTPAddr string
+}
+
+// bindings ties every setting to its field in c, in the order of the settings
+// form. The constructors fix the type of the field and of its default, so a
+// mismatch is a compile error.
+func (c *Config) bindings() []binding {
+	return slices.Concat(
+		in("Mailbox (IMAP)",
+			text(&c.IMAPHost, "imap.host", "Server", ""),
+			number(&c.IMAPPort, "imap.port", "Port", 993),
+			text(&c.IMAPUser, "imap.user", "Benutzer", ""),
+			secret(&c.IMAPPass, "imap.pass", "Passwort"),
+			text(&c.IMAPMailbox, "imap.mailbox", "Postfach", "INBOX"),
+			toggle(&c.IMAPTLS, "imap.tls", "TLS", true),
+			number(&c.IMAPDays, "imap.days", "Zeitraum (Tage)", 30),
+		),
+		in("Mailversand (SMTP)",
+			text(&c.SMTPHost, "smtp.host", "Server", ""),
+			number(&c.SMTPPort, "smtp.port", "Port", 587),
+			text(&c.SMTPUser, "smtp.user", "Benutzer", ""),
+			secret(&c.SMTPPass, "smtp.pass", "Passwort"),
+			text(&c.SMTPFrom, "smtp.from", "Absenderadresse", ""),
+		),
+		in("LLM",
+			text(&c.LLMBaseURL, "llm.base_url", "API Base URL", "https://api.anthropic.com/v1"),
+			secret(&c.LLMKey, "llm.api_key", "API Key"),
+			text(&c.LLMModel, "llm.model", "Modell", "claude-opus-5"),
+			text(&c.LLMKind, "llm.kind", "API-Dialekt (anthropic|openai)", "anthropic"),
+			number(&c.LLMTimeout, "llm.timeout", "Timeout (s)", 120),
+		),
+		in("OCR",
+			text(&c.OCRBaseURL, "ocr.base_url", "API Base URL", "https://api.mistral.ai/v1"),
+			secret(&c.OCRKey, "ocr.api_key", "API Key"),
+			text(&c.OCRModel, "ocr.model", "Modell", "mistral-ocr-latest"),
+		),
+		in("DATEV",
+			text(&c.DatevTo, "datev.to", "DATEV-Empfangsadresse", ""),
+			text(&c.DatevFrom, "datev.from", "Absenderadresse", ""),
+			text(&c.DatevSubject, "datev.subject", "Betreff-Vorlage", "Rechnungseingang {{number}}"),
+			toggle(&c.DatevEnabled, "datev.enabled", "Aktiv", true),
+		),
+		in("sevDesk",
+			text(&c.SevDeskBaseURL, "sevdesk.base_url", "API Base URL", "https://my.sevdesk.de/api/v1"),
+			secret(&c.SevDeskToken, "sevdesk.token", "API Token"),
+			toggle(&c.SevDeskEnabled, "sevdesk.enabled", "Aktiv", true),
+			decimal(&c.SevDeskTol, "sevdesk.fx_tolerance", "FX-Toleranz (%)", 5),
+			text(&c.SevDeskTaxRule, "sevdesk.tax_rule", "Steuerregel (1=USt-pflichtig, 5=Reverse Charge, 11=§19 UStG)", "1"),
+			text(&c.SevDeskGain, "sevdesk.gain_account", "Konto Erlös Währungsumrechnung", "4840"),
+			text(&c.SevDeskLoss, "sevdesk.loss_account", "Konto Verlust Währungsumrechnung", "6880"),
+		),
+		in("Ablage",
+			text(&c.ArchiveDir, "archive.base_dir", "Basisverzeichnis", "./FIBU"),
+			text(&c.SpoolDir, "spool.dir", "Spool-Verzeichnis (Originale)", "./spool"),
+		),
+		in("Backup (Litestream)",
+			toggle(&c.BackupEnabled, "backup.enabled", "Aktiv", false),
+			text(&c.BackupEndpoint, "backup.endpoint", "S3-Endpoint", "https://fsn1.your-objectstorage.com"),
+			text(&c.BackupRegion, "backup.region", "Region", "fsn1"),
+			text(&c.BackupBucket, "backup.bucket", "Bucket", ""),
+			text(&c.BackupPath, "backup.path", "Pfad im Bucket", "rechnungen"),
+			secret(&c.BackupKeyID, "backup.access_key_id", "Access Key ID"),
+			secret(&c.BackupSecret, "backup.secret_access_key", "Secret Access Key"),
+			toggle(&c.BackupPathStyle, "backup.force_path_style", "Path-Style-URLs", true),
+			number(&c.BackupInterval, "backup.sync_interval", "Sync-Intervall (s)", 10),
+		),
+		in("Ablauf",
+			text(&c.DailyAt, "schedule.daily_at", "Tägliche Ausführung (HH:MM)", "03:00"),
+			text(&c.HTTPAddr, "http.addr", "Web-UI Adresse", "localhost:8080"),
+		),
+	)
 }
 
 // Field describes one configuration value for the settings form.
@@ -71,19 +142,89 @@ type Field struct {
 	Secret                         bool
 }
 
+// binding is a Field plus the means to read and write the Config field behind
+// it. Value stays empty until Fields fills it in.
+type binding struct {
+	Field
+	def string // default in stored form, used when nothing is stored
+	get func() string
+	set func(raw string) error
+}
+
+// in puts the bindings into one group of the settings form.
+func in(group string, bs ...binding) []binding {
+	for i := range bs {
+		bs[i].Group = group
+	}
+	return bs
+}
+
+func text(p *string, key, label, def string) binding {
+	return binding{
+		Field: Field{Key: key, Label: label, Kind: "text"},
+		def:   def,
+		get:   func() string { return *p },
+		set:   func(raw string) error { *p = raw; return nil },
+	}
+}
+
+// secret is a text setting that is never sent back to the browser.
+func secret(p *string, key, label string) binding {
+	b := text(p, key, label, "")
+	b.Secret = true
+	return b
+}
+
+func number(p *int, key, label string, def int) binding {
+	return binding{
+		Field: Field{Key: key, Label: label, Kind: "number"},
+		def:   strconv.Itoa(def),
+		get:   func() string { return strconv.Itoa(*p) },
+		set: func(raw string) error {
+			n, err := strconv.Atoi(raw)
+			if err != nil {
+				return err
+			}
+			*p = n
+			return nil
+		},
+	}
+}
+
+func decimal(p *float64, key, label string, def float64) binding {
+	format := func(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+	return binding{
+		Field: Field{Key: key, Label: label, Kind: "number"},
+		def:   format(def),
+		get:   func() string { return format(*p) },
+		set: func(raw string) error {
+			f, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return err
+			}
+			*p = f
+			return nil
+		},
+	}
+}
+
+func toggle(p *bool, key, label string, def bool) binding {
+	return binding{
+		Field: Field{Key: key, Label: label, Kind: "checkbox"},
+		def:   strconv.FormatBool(def),
+		get:   func() string { return strconv.FormatBool(*p) },
+		set:   func(raw string) error { *p = raw == "true" || raw == "on" || raw == "1"; return nil },
+	}
+}
+
 // Fields returns the settings form description, in declaration order.
 func (c *Config) Fields() []Field {
 	var out []Field
-	c.each(func(f reflect.StructField, v reflect.Value) {
-		out = append(out, Field{
-			Key:    f.Tag.Get("cfg"),
-			Label:  f.Tag.Get("label"),
-			Group:  f.Tag.Get("group"),
-			Kind:   kindOf(v),
-			Value:  format(v),
-			Secret: f.Tag.Get("secret") == "true",
-		})
-	})
+	for _, b := range c.bindings() {
+		f := b.Field
+		f.Value = b.get()
+		out = append(out, f)
+	}
 	return out
 }
 
@@ -111,89 +252,27 @@ func (c *Config) Groups() []struct {
 }
 
 // Load builds a Config from stored settings, falling back to the defaults
-// declared in the struct tags.
+// declared in bindings.
 func Load(values map[string]string) (*Config, error) {
 	c := &Config{}
 	var err error
-	c.each(func(f reflect.StructField, v reflect.Value) {
-		key := f.Tag.Get("cfg")
-		raw, ok := values[key]
+	for _, b := range c.bindings() {
+		raw, ok := values[b.Key]
 		if !ok || raw == "" {
-			raw = f.Tag.Get("default")
+			raw = b.def
 		}
-		if e := set(v, raw); e != nil && err == nil {
-			err = fmt.Errorf("setting %s: %w", key, e)
+		if e := b.set(raw); e != nil && err == nil {
+			err = fmt.Errorf("setting %s: %w", b.Key, e)
 		}
-	})
+	}
 	return c, err
 }
 
 // Values turns a Config back into the flat map stored in the database.
 func (c *Config) Values() map[string]string {
 	m := map[string]string{}
-	c.each(func(f reflect.StructField, v reflect.Value) { m[f.Tag.Get("cfg")] = format(v) })
+	for _, b := range c.bindings() {
+		m[b.Key] = b.get()
+	}
 	return m
-}
-
-func (c *Config) each(fn func(reflect.StructField, reflect.Value)) {
-	rv := reflect.ValueOf(c).Elem()
-	rt := rv.Type()
-	for i := 0; i < rt.NumField(); i++ {
-		if rt.Field(i).Tag.Get("cfg") == "" {
-			continue
-		}
-		fn(rt.Field(i), rv.Field(i))
-	}
-}
-
-func kindOf(v reflect.Value) string {
-	switch v.Kind() {
-	case reflect.Bool:
-		return "checkbox"
-	case reflect.Int, reflect.Float64:
-		return "number"
-	default:
-		return "text"
-	}
-}
-
-func format(v reflect.Value) string {
-	switch v.Kind() {
-	case reflect.Bool:
-		return strconv.FormatBool(v.Bool())
-	case reflect.Int:
-		return strconv.FormatInt(v.Int(), 10)
-	case reflect.Float64:
-		return strconv.FormatFloat(v.Float(), 'f', -1, 64)
-	default:
-		return v.String()
-	}
-}
-
-func set(v reflect.Value, raw string) error {
-	switch v.Kind() {
-	case reflect.Bool:
-		v.SetBool(raw == "true" || raw == "on" || raw == "1")
-	case reflect.Int:
-		if raw == "" {
-			return nil
-		}
-		n, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return err
-		}
-		v.SetInt(n)
-	case reflect.Float64:
-		if raw == "" {
-			return nil
-		}
-		f, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return err
-		}
-		v.SetFloat(f)
-	default:
-		v.SetString(raw)
-	}
-	return nil
 }
