@@ -107,9 +107,10 @@ Cheapest and most reliable technique first:
 2. **PDF text layer** — keyword scanning in German and English
    (`Rechnungs-Nr.`, `Invoice No.`, `Gesamtbetrag`, `Total due`, …), with
    amount parsing that handles both `1.234,56` and `1,234.56`.
-3. **LLM** — whatever the keyword scan could not find. Defaults to Claude
-   (`claude-opus-5`) through the official Anthropic SDK; set `llm.kind` to
-   `openai` to use any OpenAI-compatible endpoint instead.
+3. **LLM** — whatever the keyword scan could not find. Defaults to GLM
+   (`~z-ai/glm-flash-latest`) through OpenRouter's OpenAI-compatible API; set
+   `llm.kind` to `anthropic` to use Claude through the official Anthropic SDK
+   instead.
 4. **OCR** — for PDFs that are nothing but a scan. Defaults to Mistral OCR
    (`mistral-ocr-latest`); the endpoint is configurable.
 
